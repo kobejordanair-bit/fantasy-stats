@@ -16,7 +16,7 @@ CLIENT_ID     = os.getenv("YAHOO_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("YAHOO_CLIENT_SECRET", "")
 # ======================================================
 
-REDIRECT_URI = "http://localhost:8080"
+REDIRECT_URI = "https://localhost:8080"
 AUTH_URL     = "https://api.login.yahoo.com/oauth2/request_auth"
 TOKEN_URL    = "https://api.login.yahoo.com/oauth2/get_token"
 BASE_URL     = "https://fantasysports.yahooapis.com/fantasy/v2"
