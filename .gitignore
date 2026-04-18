@@ -1,0 +1,4 @@
+.env
+*.csv
+fantasy_dashboard.html
+__pycache__/
