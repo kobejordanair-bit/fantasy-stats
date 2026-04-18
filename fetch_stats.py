@@ -1219,6 +1219,23 @@ def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail
         })
     mvp_data.sort(key=lambda x: x["z_total"], reverse=True)
 
+    # ── 球員名冊 ─────────────────────────────────────────────────
+    roster_cols = display_cols  # 同 cat_leaders 使用的欄位清單
+    pct_cols_set = set(c for c in roster_cols if is_pct_col(c))
+    roster_data = []
+    for pid, d in player_totals.items():
+        wks = max(d.get("weeks", 1), 1)
+        row = {
+            "name": d["name"], "pos": d["pos"],
+            "status": d.get("status", "未知"), "weeks": d.get("weeks", 0),
+            "totals": {}, "avgs": {},
+        }
+        for col in roster_cols:
+            val = to_float(d.get(col, 0))
+            row["totals"][col] = round(val, 4)
+            row["avgs"][col]   = round(val, 4) if is_pct_col(col) else round(val / wks, 4)
+        roster_data.append(row)
+
     dashboard = {
         "teamName": team_name,
         "weeks": [f"W{w}" for w in weeks],
@@ -1237,6 +1254,9 @@ def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail
         "catLeaders": cat_leaders,
         "mvpData": mvp_data,
         "mvpCols": mvp_cols,
+        "rosterData": roster_data,
+        "rosterCols": roster_cols,
+        "rosterPctCols": list(pct_cols_set),
     }
 
     safe_name = html_lib.escape(team_name)
@@ -1309,6 +1329,7 @@ tr:hover td {{ background: #263548; }}
   <div class="tab" onclick="showPanel('waiver',this)">🎯 FA/Waiver 評估</div>
   <div class="tab" onclick="showPanel('leaders',this)">🏅 數據王</div>
   <div class="tab" onclick="showPanel('mvp',this)">🧮 MVP</div>
+  <div class="tab" onclick="showPanel('roster',this)">🗂️ 球員名冊</div>
 </div>
 
 <div id="panel-stats" class="panel active">
@@ -1375,6 +1396,31 @@ tr:hover td {{ background: #263548; }}
       數據為撿入後該球員在我陣上期間的累積與週均，同一球員若多次撿入則分開計算。
     </p>
     <div id="waiverList"></div>
+  </div>
+</div>
+
+<div id="panel-roster" class="panel">
+  <div class="card">
+    <div class="card-head">
+      <h2>🗂️ 球員名冊</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span style="color:#64748b;font-size:0.82rem">檢視：</span>
+        <button id="rosterViewBtn" onclick="toggleRosterView()"
+          style="background:#334155;color:#f1f5f9;border:1px solid #475569;
+                 border-radius:6px;padding:5px 12px;cursor:pointer;font-size:0.85rem">
+          切換至週均
+        </button>
+      </div>
+    </div>
+    <p style="color:#64748b;font-size:0.82rem;margin-bottom:12px">
+      點擊欄位標題可排序（再點一次切換升冪/降冪）。預設依累積 PTS 降冪排列。
+    </p>
+    <div style="overflow-x:auto">
+      <table id="rosterTable">
+        <thead id="rosterHead"></thead>
+        <tbody id="rosterBody"></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -1524,6 +1570,58 @@ D.roiData.forEach(r => {{
     ${{catsHtml}}
   </div>`;
 }});
+
+// 球員名冊
+let rosterView = 'totals';
+let rosterSortCol = D.rosterCols.includes('PTS') ? 'PTS' : (D.rosterCols[0] || null);
+let rosterSortDir = -1;
+
+function toggleRosterView() {{
+  rosterView = rosterView === 'totals' ? 'avgs' : 'totals';
+  document.getElementById('rosterViewBtn').textContent =
+    rosterView === 'totals' ? '切換至週均' : '切換至累積';
+  renderRoster();
+}}
+function rosterSortBy(col) {{
+  rosterSortDir = rosterSortCol === col ? rosterSortDir * -1 : -1;
+  rosterSortCol = col;
+  renderRoster();
+}}
+function fmtRosterVal(val, col) {{
+  if (D.rosterPctCols.includes(col)) return (val * 100).toFixed(1) + '%';
+  return rosterView === 'totals' ? Math.round(val * 10) / 10 : Math.round(val * 100) / 100;
+}}
+function renderRoster() {{
+  const head = document.getElementById('rosterHead');
+  let hHtml = '<tr><th style="white-space:nowrap">球員</th><th>位置</th><th>狀態</th><th>週數</th>';
+  D.rosterCols.forEach(col => {{
+    const icon = rosterSortCol === col ? (rosterSortDir === -1 ? ' ▼' : ' ▲') : '';
+    hHtml += `<th style="cursor:pointer;white-space:nowrap" onclick="rosterSortBy('${{col}}')">${{col}}${{icon}}</th>`;
+  }});
+  head.innerHTML = hHtml + '</tr>';
+
+  const rows = [...D.rosterData];
+  if (rosterSortCol) {{
+    rows.sort((a, b) => rosterSortDir * ((b[rosterView][rosterSortCol] || 0) - (a[rosterView][rosterSortCol] || 0)));
+  }}
+  const body = document.getElementById('rosterBody');
+  body.innerHTML = '';
+  rows.forEach(r => {{
+    const sc = r.status === '已釋出' ? '#f87171' : '#34d399';
+    let tr = `<tr>
+      <td style="font-weight:600;white-space:nowrap">${{r.name}}</td>
+      <td style="color:#64748b">${{r.pos}}</td>
+      <td style="color:${{sc}};font-size:0.8rem">${{r.status}}</td>
+      <td style="color:#64748b">${{r.weeks}}</td>`;
+    D.rosterCols.forEach(col => {{
+      const v = r[rosterView][col] || 0;
+      const hl = col === rosterSortCol ? 'color:#38bdf8;font-weight:600;' : '';
+      tr += `<td style="${{hl}}">${{fmtRosterVal(v, col)}}</td>`;
+    }});
+    body.innerHTML += tr + '</tr>';
+  }});
+}}
+renderRoster();
 
 // 數據王
 const leadersBody = document.getElementById('leadersBody');
