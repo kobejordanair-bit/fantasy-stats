@@ -1039,7 +1039,7 @@ def export_csvs(team_name, player_totals, team_weekly_summary,
 def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail,
                              stat_cols, matchups, cat_record, trades,
                              roi_results, compare_cols, stat_map,
-                             waiver_results, waiver_compare_cols):
+                             waiver_results, waiver_compare_cols, player_totals):
     weeks = sorted(set(r["week"] for r in team_weekly_summary))
     num_cols = [c for c in stat_cols if c not in ("FGA", "FTA", "3PTA", "GP", "FGM/A")]
 
@@ -1112,6 +1112,72 @@ def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail
             })
         waiver_data.append(entry)
 
+    # ── 數據王 ──────────────────────────────────────────────────
+    display_cols = [c for c in stat_cols if c not in ("FGA", "FTA", "3PTA", "GP", "FGM/A")]
+    active_players = [(pid, d) for pid, d in player_totals.items() if d.get("weeks", 0) > 0]
+
+    cat_leaders = []
+    for col in display_cols:
+        is_neg = col in NEGATIVE_COLS
+        is_pct = is_pct_col(col)
+        entry = {"col": col, "is_neg": is_neg, "total_name": None, "total_val": None,
+                 "avg_name": "-", "avg_val": "-"}
+        if not active_players:
+            cat_leaders.append(entry)
+            continue
+        if not is_pct:
+            ranked_t = sorted(active_players,
+                              key=lambda x: to_float(x[1].get(col, 0)),
+                              reverse=not is_neg)
+            best = ranked_t[0][1]
+            entry["total_name"] = best["name"]
+            entry["total_val"] = round(to_float(best.get(col, 0)), 1)
+        if is_pct:
+            ranked_a = sorted(active_players,
+                              key=lambda x: to_float(x[1].get(col, 0)),
+                              reverse=not is_neg)
+        else:
+            ranked_a = sorted(active_players,
+                              key=lambda x: to_float(x[1].get(col, 0)) / max(x[1].get("weeks", 1), 1),
+                              reverse=not is_neg)
+        best_a = ranked_a[0][1]
+        entry["avg_name"] = best_a["name"]
+        val_a = to_float(best_a.get(col, 0))
+        if is_pct:
+            entry["avg_val"] = f"{val_a:.1%}"
+        else:
+            entry["avg_val"] = round(val_a / max(best_a.get("weeks", 1), 1), 2)
+        cat_leaders.append(entry)
+
+    # ── MVP Z-score ──────────────────────────────────────────────
+    mvp_cols = [c for c in stat_cols
+                if c not in ("FGA", "FTA", "3PTA", "GP", "FGM/A") and not is_pct_col(c)]
+
+    col_mean_std = {}
+    for col in mvp_cols:
+        vals = [to_float(d.get(col, 0)) for _, d in active_players]
+        mean = sum(vals) / len(vals) if vals else 0
+        std = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5 if vals else 1
+        col_mean_std[col] = (mean, std if std > 0 else 1)
+
+    mvp_data = []
+    for pid, d in active_players:
+        z_total = 0.0
+        z_breakdown = {}
+        for col in mvp_cols:
+            mean, std = col_mean_std[col]
+            z = (to_float(d.get(col, 0)) - mean) / std
+            if col in NEGATIVE_COLS:
+                z = -z
+            z_breakdown[col] = round(z, 3)
+            z_total += z
+        mvp_data.append({
+            "name": d["name"], "pos": d["pos"],
+            "weeks": d.get("weeks", 0), "status": d.get("status", ""),
+            "z_total": round(z_total, 3), "z_breakdown": z_breakdown,
+        })
+    mvp_data.sort(key=lambda x: x["z_total"], reverse=True)
+
     dashboard = {
         "teamName": team_name,
         "weeks": [f"W{w}" for w in weeks],
@@ -1127,6 +1193,9 @@ def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail
         "roiData": roi_data,
         "waiverData": waiver_data,
         "waiverCols": waiver_display,
+        "catLeaders": cat_leaders,
+        "mvpData": mvp_data,
+        "mvpCols": mvp_cols,
     }
 
     safe_name = html_lib.escape(team_name)
@@ -1197,6 +1266,8 @@ tr:hover td {{ background: #263548; }}
   <div class="tab" onclick="showPanel('trades',this)">🔄 交易紀錄</div>
   <div class="tab" onclick="showPanel('roi',this)">📈 交易 ROI</div>
   <div class="tab" onclick="showPanel('waiver',this)">🎯 FA/Waiver 評估</div>
+  <div class="tab" onclick="showPanel('leaders',this)">🏅 數據王</div>
+  <div class="tab" onclick="showPanel('mvp',this)">🧮 MVP</div>
 </div>
 
 <div id="panel-stats" class="panel active">
@@ -1257,6 +1328,39 @@ tr:hover td {{ background: #263548; }}
       數據為撿入後該球員在我陣上期間的累積與週均，同一球員若多次撿入則分開計算。
     </p>
     <div id="waiverList"></div>
+  </div>
+</div>
+
+<div id="panel-leaders" class="panel">
+  <div class="card">
+    <div class="card-head"><h2>🏅 各項目數據王</h2></div>
+    <p style="color:#64748b;font-size:0.82rem;margin-bottom:16px">
+      <b style="color:#fbbf24">總數據王</b>：整季累積最高｜
+      <b style="color:#34d399">週均王</b>：總數據 ÷ 在陣週數，反映每週平均貢獻。
+      <span style="color:#f87171">「越低越好」項目</span>（TO、PF 等）以最小值為優。
+      百分比類別（FG%、FT%）不列總數據王，僅比較整段期間命中率。
+    </p>
+    <table><thead><tr>
+      <th>項目</th>
+      <th style="color:#fbbf24">🥇 總數據王</th><th style="color:#fbbf24">累積</th>
+      <th style="color:#34d399">📊 週均王</th><th style="color:#34d399">週均</th>
+    </tr></thead>
+    <tbody id="leadersBody"></tbody></table>
+  </div>
+</div>
+
+<div id="panel-mvp" class="panel">
+  <div class="card">
+    <div class="card-head"><h2>🧮 MVP 排行（Z-score 綜合分）</h2></div>
+    <p style="color:#64748b;font-size:0.82rem;margin-bottom:16px">
+      <b style="color:#f1f5f9">Z-score 是什麼？</b>
+      把每個球員的各項數據，跟所有隊友的平均值比較，計算「超越平均幾個標準差」。
+      例如全隊平均 PTS 是 300，標準差 50，你的球員拿了 400，Z-score 就是 +2.0。
+      各類別的 Z-score 加總後，數字越高代表在越多項目上超越隊友，整體貢獻越突出。
+      負向類別（TO、PF 等）已自動反轉——失誤越少拿越高分。
+      <b style="color:#94a3b8">百分比欄位（FG%/FT%）暫不納入，避免出賽少的球員命中率失真。</b>
+    </p>
+    <div id="mvpList"></div>
   </div>
 </div>
 
@@ -1375,6 +1479,56 @@ D.roiData.forEach(r => {{
   </div>`;
 }});
 
+// 數據王
+const leadersBody = document.getElementById('leadersBody');
+D.catLeaders.forEach(c => {{
+  const negTag = c.is_neg ? '<span style="font-size:0.7rem;color:#f87171;margin-left:4px">越低越好</span>' : '';
+  const totalCells = c.total_name !== null
+    ? `<td style="color:#fbbf24;font-weight:600">${{c.total_name}}</td><td>${{c.total_val}}</td>`
+    : `<td style="color:#475569" colspan="2">—</td>`;
+  leadersBody.innerHTML += `<tr>
+    <td>${{c.col}}${{negTag}}</td>
+    ${{totalCells}}
+    <td style="color:#34d399;font-weight:600">${{c.avg_name}}</td>
+    <td>${{c.avg_val}}</td>
+  </tr>`;
+}});
+
+// MVP
+const mvpList = document.getElementById('mvpList');
+D.mvpData.forEach((p, idx) => {{
+  const rankClass = idx === 0 ? 'top1' : idx === 1 ? 'top2' : idx === 2 ? 'top3' : '';
+  const zColor = p.z_total >= 0 ? '#34d399' : '#f87171';
+  const zSign = p.z_total >= 0 ? '+' : '';
+  let barsHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">';
+  D.mvpCols.forEach(col => {{
+    const z = p.z_breakdown[col] || 0;
+    const barColor = z >= 0 ? '#34d399' : '#f87171';
+    const sign = z >= 0 ? '+' : '';
+    barsHtml += `<div style="background:#0f172a;border-radius:6px;padding:6px 10px;font-size:0.75rem;min-width:72px;text-align:center">
+      <div style="color:#64748b">${{col}}</div>
+      <div style="color:${{barColor}};font-weight:600">${{sign}}${{z.toFixed(2)}}</div>
+    </div>`;
+  }});
+  barsHtml += '</div>';
+  const releasedTag = p.status === '已釋出' ? '<span style="color:#f87171;font-size:0.73rem;margin-left:6px">已釋出</span>' : '';
+  mvpList.innerHTML += `<div class="roi-card" style="margin-bottom:16px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px">
+      <div class="rank-badge ${{rankClass}}">${{idx+1}}</div>
+      <div style="flex:1">
+        <span style="font-weight:700;font-size:1rem">${{p.name}}</span>
+        <span style="color:#64748b;font-size:0.8rem;margin-left:8px">${{p.pos}} · ${{p.weeks}} 週</span>
+        ${{releasedTag}}
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:1.1rem;font-weight:700;color:${{zColor}}">${{zSign}}${{p.z_total.toFixed(2)}}</div>
+        <div style="font-size:0.72rem;color:#64748b">Z-score 綜合分</div>
+      </div>
+    </div>
+    ${{barsHtml}}
+  </div>`;
+}});
+
 // Waiver 評估
 const waiverList = document.getElementById('waiverList');
 D.waiverData.forEach((r, idx) => {{
@@ -1484,7 +1638,7 @@ def main():
         team_name, team_weekly_summary, player_weekly_detail,
         stat_cols, matchups, cat_record, trades,
         roi_results, compare_cols, stat_map,
-        waiver_results, waiver_compare_cols)
+        waiver_results, waiver_compare_cols, player_totals)
     webbrowser.open(f"file://{html_path}")
     print(f"   fantasy_dashboard.html 已開啟")
 
