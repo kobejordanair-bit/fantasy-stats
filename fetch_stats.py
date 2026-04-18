@@ -3,6 +3,7 @@
 Yahoo Fantasy Basketball - 整季完整分析
 """
 
+import html as html_lib
 import requests, json, csv, os, time, webbrowser
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs
@@ -15,11 +16,11 @@ CLIENT_ID     = os.getenv("YAHOO_CLIENT_ID", "")
 CLIENT_SECRET = os.getenv("YAHOO_CLIENT_SECRET", "")
 # ======================================================
 
-REDIRECT_URI = "https://localhost:8080"
+REDIRECT_URI = "http://localhost:8080"
 AUTH_URL     = "https://api.login.yahoo.com/oauth2/request_auth"
 TOKEN_URL    = "https://api.login.yahoo.com/oauth2/get_token"
 BASE_URL     = "https://fantasysports.yahooapis.com/fantasy/v2"
-DEBUG = False
+TOKEN_FILE   = ".yahoo_token.json"
 
 PCT_COLS = {
     "FG%":  ("FGM", "FGA"),
@@ -34,7 +35,47 @@ HIDDEN_STATS = {
 NEGATIVE_COLS = {"TO", "PF", "TECH", "FF"}
 
 
-def authorize():
+def _find_players_block(obj):
+    """遞迴尋找 Yahoo API 回傳結構中的 players 字典（含 count + 索引鍵）。"""
+    if isinstance(obj, dict):
+        if "0" in obj and isinstance(obj["0"], dict) and "player" in obj["0"]:
+            return obj
+        for v in obj.values():
+            r = _find_players_block(v)
+            if r:
+                return r
+    elif isinstance(obj, list):
+        for item in obj:
+            r = _find_players_block(item)
+            if r:
+                return r
+    return None
+
+
+def _find_team_stats(obj):
+    """遞迴尋找 Yahoo API 回傳結構中的 team_stats 區塊。"""
+    if isinstance(obj, dict):
+        if "team_stats" in obj:
+            return obj["team_stats"]
+        for v in obj.values():
+            r = _find_team_stats(v)
+            if r:
+                return r
+    elif isinstance(obj, list):
+        for item in obj:
+            r = _find_team_stats(item)
+            if r:
+                return r
+    return None
+
+
+def _save_token(data):
+    data["expires_at"] = time.time() + data.get("expires_in", 3600)
+    with open(TOKEN_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def _do_oauth_flow():
     auth_url = (f"{AUTH_URL}?client_id={CLIENT_ID}"
                 f"&redirect_uri={REDIRECT_URI}&response_type=code")
     print("\n" + "=" * 55)
@@ -53,8 +94,35 @@ def authorize():
         auth=(CLIENT_ID, CLIENT_SECRET))
     if resp.status_code != 200:
         raise ValueError(f"Token 失敗: {resp.text}")
+    data = resp.json()
+    _save_token(data)
     print("授權成功！\n")
-    return resp.json()["access_token"]
+    return data["access_token"]
+
+
+def authorize():
+    if os.path.exists(TOKEN_FILE):
+        try:
+            with open(TOKEN_FILE) as f:
+                saved = json.load(f)
+            if time.time() < saved.get("expires_at", 0) - 60:
+                print("使用已儲存的 token\n")
+                return saved["access_token"]
+            if "refresh_token" in saved:
+                print("Token 已過期，嘗試自動更新...")
+                resp = requests.post(TOKEN_URL,
+                    data={"grant_type": "refresh_token",
+                          "refresh_token": saved["refresh_token"]},
+                    auth=(CLIENT_ID, CLIENT_SECRET))
+                if resp.status_code == 200:
+                    data = resp.json()
+                    _save_token(data)
+                    print("Token 更新成功！\n")
+                    return data["access_token"]
+                print(f"Refresh 失敗（{resp.status_code}），重新授權...")
+        except Exception as e:
+            print(f"Token 載入失敗（{e}），重新授權...")
+    return _do_oauth_flow()
 
 
 def api_get(token, path, retries=3):
@@ -217,7 +285,7 @@ def parse_stats(player_data, stat_map):
                 try:
                     made_s, att_s = val.split("/")
                     made, att = float(made_s), float(att_s)
-                    if "3" in col:
+                    if col.startswith("3"):
                         stats["3PTM"] = str(made); stats["3PTA"] = str(att)
                     elif "FT" in col:
                         stats["FTM"] = str(made); stats["FTA"] = str(att)
@@ -281,7 +349,7 @@ def to_float(val, default=0.0):
             m_s, a_s = val.split("/")
             return float(m_s) / float(a_s) if float(a_s) > 0 else default
         return float(val)
-    except:
+    except (ValueError, TypeError, ZeroDivisionError):
         return default
 
 
@@ -378,20 +446,7 @@ def fetch_matchups(token, league_key, team_key, start_week, end_week, stat_cols,
                             if "team_key" in attr: t_key = attr["team_key"]
                             if "name" in attr: t_name = attr["name"]
 
-                    # 安全取得這隊的當週 stats
-                    def extract_stats(obj):
-                        if isinstance(obj, dict):
-                            if "team_stats" in obj: return obj["team_stats"]
-                            for v in obj.values():
-                                r = extract_stats(v)
-                                if r: return r
-                        elif isinstance(obj, list):
-                            for item in obj:
-                                r = extract_stats(item)
-                                if r: return r
-                        return None
-
-                    ts_block = extract_stats(t_data)
+                    ts_block = _find_team_stats(t_data)
                     if ts_block and "stats" in ts_block:
                         raw_s = ts_block["stats"]
                         s_list = [v for k, v in raw_s.items() if str(k) != "count" and isinstance(v, dict)] if isinstance(raw_s, dict) else raw_s
@@ -555,20 +610,7 @@ def lookup_player_key(token, league_key, player_name):
         search_name = player_name.replace(" ", "%20")
         data = api_get(token, f"/league/{league_key}/players;search={search_name}")
 
-        def get_players_block(obj):
-            if isinstance(obj, dict):
-                if "0" in obj and isinstance(obj["0"], dict) and "player" in obj["0"]:
-                    return obj
-                for v in obj.values():
-                    r = get_players_block(v)
-                    if r: return r
-            elif isinstance(obj, list):
-                for item in obj:
-                    r = get_players_block(item)
-                    if r: return r
-            return None
-
-        players = get_players_block(data)
+        players = _find_players_block(data)
         if not players or players.get("count", 0) == 0:
             return None
         p_info = players["0"]["player"][0]
@@ -594,19 +636,7 @@ def fetch_player_weekly_stats(token, league_key, player_key, weeks, stat_map):
         for url in urls:
             try:
                 data = api_get(token, url, retries=1)
-                def get_players_block(obj):
-                    if isinstance(obj, dict):
-                        if "0" in obj and isinstance(obj["0"], dict) and "player" in obj["0"]:
-                            return obj
-                        for v in obj.values():
-                            r = get_players_block(v)
-                            if r: return r
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            r = get_players_block(item)
-                            if r: return r
-                    return None
-                players = get_players_block(data)
+                players = _find_players_block(data)
                 if players and players.get("count", 0) > 0:
                     player_data = players["0"]["player"]
                     s = parse_stats(player_data, stat_map)
@@ -626,7 +656,7 @@ def date_str_to_timestamp(date_str):
     try:
         dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         return int(dt.timestamp())
-    except:
+    except (ValueError, TypeError):
         return 0
 
 
@@ -796,7 +826,7 @@ def calc_trade_roi(token, league_key, trades, player_weekly_detail, week_dates, 
 
 # ==================== Waiver 撿人評估 ====================
 
-def calc_waiver_roi(waivers, player_weekly_detail, week_dates, stat_cols, global_name_to_pkey):
+def calc_waiver_roi(waivers, player_weekly_detail, week_dates, stat_cols):
     """
     對每筆撿人計算：從撿入那週起，該球員在我陣上的累積數據與週均。
     同一個球員可能被撿入多次，各自計算。
@@ -824,7 +854,6 @@ def calc_waiver_roi(waivers, player_weekly_detail, week_dates, stat_cols, global
         # 加總從撿入週起，球員在我陣上的數據
         totals = defaultdict(float)
         weeks_on_roster = 0
-        made_att = defaultdict(lambda: [0.0, 0.0])
 
         for week, row in sorted(player_lookup[name].items()):
             if week < first_week: continue
@@ -1100,11 +1129,14 @@ def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail
         "waiverCols": waiver_display,
     }
 
+    safe_name = html_lib.escape(team_name)
+    dashboard_json = json.dumps(dashboard, ensure_ascii=False).replace("</script>", r"<\/script>")
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
 <meta charset="UTF-8">
-<title>{team_name} - Fantasy 戰情室</title>
+<title>{safe_name} - Fantasy 戰情室</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -1156,7 +1188,7 @@ tr:hover td {{ background: #263548; }}
 </style>
 </head>
 <body>
-<h1>🏀 {team_name}</h1>
+<h1>🏀 {safe_name}</h1>
 <p class="subtitle">賽季完整戰情分析儀表板</p>
 <div class="tabs">
   <div class="tab active" onclick="showPanel('stats',this)">📊 球員統計</div>
@@ -1229,7 +1261,7 @@ tr:hover td {{ background: #263548; }}
 </div>
 
 <script>
-const D = {json.dumps(dashboard, ensure_ascii=False)};
+const D = {dashboard_json};
 
 function showPanel(id, el) {{
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -1434,7 +1466,7 @@ def main():
 
     print(f"\n【5/5】計算 Waiver 撿人評估...")
     waiver_results, waiver_compare_cols = calc_waiver_roi(
-        waivers, player_weekly_detail, week_dates, stat_cols, global_name_to_pkey)
+        waivers, player_weekly_detail, week_dates, stat_cols)
     print(f"  共 {len(waiver_results)} 筆撿人紀錄分析完成")
 
     if not player_totals:
