@@ -1126,23 +1126,29 @@ def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail
             })
         roi_data.append(entry)
 
-    # Waiver 數據準備
-    key_cols = ["PTS", "REB", "AST", "ST", "BLK", "3PTM", "TO"]
-    waiver_display = [c for c in key_cols if c in waiver_compare_cols]
+    # Waiver 數據準備 — 顯示所有聯盟類別（不再寫死 key_cols）
+    waiver_display = [c for c in waiver_compare_cols if c not in ("FGA", "FTA", "3PTA")]
+    pct_display = [c for c in stat_cols if is_pct_col(c)]
+    all_waiver_cols = waiver_display + pct_display
+
     waiver_data = []
     for r in waiver_results:
         entry = {
             "date": r["date"], "player": r["player"],
             "from_week": r["from_week"], "weeks": r["weeks_on_roster"],
-            "pts_avg": round(r["pts_avg"], 1),
-            "stats": []
+            "stats": [], "stat_map": {},
         }
-        for col in waiver_display:
+        for col in all_waiver_cols:
+            total_raw = to_float(r["totals"].get(col, 0))
+            avg_raw   = to_float(r["weekly_avg"].get(col, 0))
+            is_pct    = is_pct_col(col)
             entry["stats"].append({
                 "col": col,
-                "total": round(r["totals"].get(col, 0), 1),
-                "avg": round(r["weekly_avg"].get(col, 0), 1)
+                "total":       f"{total_raw:.1%}" if is_pct else round(total_raw, 1),
+                "avg_display": f"{avg_raw:.1%}"   if is_pct else round(avg_raw, 2),
+                "avg_raw":     round(avg_raw, 4),
             })
+            entry["stat_map"][col] = round(avg_raw, 4)
         waiver_data.append(entry)
 
     # ── 數據王 ──────────────────────────────────────────────────
@@ -1227,7 +1233,7 @@ def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail
                    for t in trades],
         "roiData": roi_data,
         "waiverData": waiver_data,
-        "waiverCols": waiver_display,
+        "waiverCols": all_waiver_cols,
         "catLeaders": cat_leaders,
         "mvpData": mvp_data,
         "mvpCols": mvp_cols,
@@ -1358,7 +1364,13 @@ tr:hover td {{ background: #263548; }}
 
 <div id="panel-waiver" class="panel">
   <div class="card">
-    <div class="card-head"><h2>🎯 FA/Waiver 撿人評估（依撿入後週均 PTS 排序）</h2></div>
+    <div class="card-head">
+      <h2>🎯 FA/Waiver 撿人評估</h2>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:#64748b;font-size:0.82rem">排序依週均：</span>
+        <select id="waiverSort"></select>
+      </div>
+    </div>
     <p style="color:#64748b;font-size:0.82rem;margin-bottom:16px">
       數據為撿入後該球員在我陣上期間的累積與週均，同一球員若多次撿入則分開計算。
     </p>
@@ -1568,34 +1580,46 @@ D.mvpData.forEach((p, idx) => {{
 }});
 
 // Waiver 評估
-const waiverList = document.getElementById('waiverList');
-D.waiverData.forEach((r, idx) => {{
-  const rankClass = idx === 0 ? 'top1' : idx === 1 ? 'top2' : idx === 2 ? 'top3' : '';
-  let statsHtml = '<div class="waiver-stat-row">';
-  r.stats.forEach(s => {{
+const waiverSortSel = document.getElementById('waiverSort');
+D.waiverCols.forEach(col => waiverSortSel.add(new Option(`週均 ${{col}}`, col)));
+
+function renderWaiverList() {{
+  const sortCol = waiverSortSel.value;
+  const sorted = [...D.waiverData].sort((a, b) =>
+    (b.stat_map[sortCol] || 0) - (a.stat_map[sortCol] || 0)
+  );
+  const waiverList = document.getElementById('waiverList');
+  waiverList.innerHTML = '';
+  sorted.forEach((r, idx) => {{
+    const rankClass = idx === 0 ? 'top1' : idx === 1 ? 'top2' : idx === 2 ? 'top3' : '';
+    let statsHtml = '<div class="waiver-stat-row">';
+    r.stats.forEach(s => {{
+      const isSort = s.col === sortCol;
+      statsHtml += `<div class="waiver-stat" style="${{isSort ? 'background:#1e3a5f;' : ''}}">
+        <div class="label">${{s.col}}</div>
+        <div class="val" style="${{isSort ? 'color:#38bdf8;' : ''}}">${{s.avg_display}}</div>
+        <div class="sub">週均｜共${{s.total}}</div>
+      </div>`;
+    }});
     statsHtml += `<div class="waiver-stat">
-      <div class="label">${{s.col}}</div>
-      <div class="val">${{s.avg}}</div>
-      <div class="sub">週均｜共${{s.total}}</div>
+      <div class="label">在陣</div>
+      <div class="val">${{r.weeks}}</div>
+      <div class="sub">週</div>
+    </div></div>`;
+    waiverList.innerHTML += `<div class="waiver-card">
+      <div class="rank-badge ${{rankClass}}">${{idx+1}}</div>
+      <div style="flex:1">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span style="font-weight:600;font-size:0.95rem">${{r.player}}</span>
+          <span style="font-size:0.75rem;color:#64748b">${{r.date}} 撿入 · 第${{r.from_week}}週起</span>
+        </div>
+        ${{statsHtml}}
+      </div>
     </div>`;
   }});
-  statsHtml += `<div class="waiver-stat">
-    <div class="label">PTS週均</div>
-    <div class="val" style="color:#38bdf8">${{r.pts_avg}}</div>
-    <div class="sub">在陣${{r.weeks}}週</div>
-  </div>`;
-  statsHtml += '</div>';
-  waiverList.innerHTML += `<div class="waiver-card">
-    <div class="rank-badge ${{rankClass}}">${{idx+1}}</div>
-    <div style="flex:1">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-        <span style="font-weight:600;font-size:0.95rem">${{r.player}}</span>
-        <span style="font-size:0.75rem;color:#64748b">${{r.date}} 撿入 · 第${{r.from_week}}週起</span>
-      </div>
-      ${{statsHtml}}
-    </div>
-  </div>`;
-}});
+}}
+waiverSortSel.addEventListener('change', renderWaiverList);
+renderWaiverList();
 </script>
 </body>
 </html>"""
