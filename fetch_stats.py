@@ -1126,9 +1126,10 @@ def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail
             cat_leaders.append(entry)
             continue
         if not is_pct:
+            # 負面類別取最高值（黑榜）；正面類別取最高值（榮譽榜），兩者都是 reverse=True
             ranked_t = sorted(active_players,
                               key=lambda x: to_float(x[1].get(col, 0)),
-                              reverse=not is_neg)
+                              reverse=True)
             best = ranked_t[0][1]
             entry["total_name"] = best["name"]
             entry["total_val"] = round(to_float(best.get(col, 0)), 1)
@@ -1137,9 +1138,10 @@ def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail
                               key=lambda x: to_float(x[1].get(col, 0)),
                               reverse=not is_neg)
         else:
+            # 週均：負面類別同樣取最高（最多），正面取最高（最多）
             ranked_a = sorted(active_players,
                               key=lambda x: to_float(x[1].get(col, 0)) / max(x[1].get("weeks", 1), 1),
-                              reverse=not is_neg)
+                              reverse=True)
         best_a = ranked_a[0][1]
         entry["avg_name"] = best_a["name"]
         val_a = to_float(best_a.get(col, 0))
@@ -1335,15 +1337,14 @@ tr:hover td {{ background: #263548; }}
   <div class="card">
     <div class="card-head"><h2>🏅 各項目數據王</h2></div>
     <p style="color:#64748b;font-size:0.82rem;margin-bottom:16px">
-      <b style="color:#fbbf24">總數據王</b>：整季累積最高｜
-      <b style="color:#34d399">週均王</b>：總數據 ÷ 在陣週數，反映每週平均貢獻。
-      <span style="color:#f87171">「越低越好」項目</span>（TO、PF 等）以最小值為優。
-      百分比類別（FG%、FT%）不列總數據王，僅比較整段期間命中率。
+      <b style="color:#fbbf24">🥇 正向類別</b>：整季累積／週均最高者奪王。
+      <b style="color:#f87171">💀 負向類別（TO、PF 等）</b>：累積／週均最高者上黑榜，失誤最多、犯規最勤，別有滋味。
+      百分比類別（FG%、FT%）不列累積王，僅比較整段命中率。
     </p>
     <table><thead><tr>
       <th>項目</th>
-      <th style="color:#fbbf24">🥇 總數據王</th><th style="color:#fbbf24">累積</th>
-      <th style="color:#34d399">📊 週均王</th><th style="color:#34d399">週均</th>
+      <th>🥇💀 累積之王</th><th>累積值</th>
+      <th>🥇💀 週均之王</th><th>週均值</th>
     </tr></thead>
     <tbody id="leadersBody"></tbody></table>
   </div>
@@ -1482,14 +1483,18 @@ D.roiData.forEach(r => {{
 // 數據王
 const leadersBody = document.getElementById('leadersBody');
 D.catLeaders.forEach(c => {{
-  const negTag = c.is_neg ? '<span style="font-size:0.7rem;color:#f87171;margin-left:4px">越低越好</span>' : '';
+  const negTag = c.is_neg ? '<span style="font-size:0.7rem;color:#f87171;margin-left:4px">💀黑榜</span>' : '';
+  const totalColor = c.is_neg ? '#f87171' : '#fbbf24';
+  const totalIcon  = c.is_neg ? '💀' : '🥇';
+  const avgIcon    = c.is_neg ? '💀' : '📊';
+  const avgColor   = c.is_neg ? '#f87171' : '#34d399';
   const totalCells = c.total_name !== null
-    ? `<td style="color:#fbbf24;font-weight:600">${{c.total_name}}</td><td>${{c.total_val}}</td>`
+    ? `<td style="color:${{totalColor}};font-weight:600">${{totalIcon}} ${{c.total_name}}</td><td>${{c.total_val}}</td>`
     : `<td style="color:#475569" colspan="2">—</td>`;
   leadersBody.innerHTML += `<tr>
     <td>${{c.col}}${{negTag}}</td>
     ${{totalCells}}
-    <td style="color:#34d399;font-weight:600">${{c.avg_name}}</td>
+    <td style="color:${{avgColor}};font-weight:600">${{avgIcon}} ${{c.avg_name}}</td>
     <td>${{c.avg_val}}</td>
   </tr>`;
 }});
