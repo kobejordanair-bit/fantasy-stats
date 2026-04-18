@@ -525,6 +525,7 @@ def fetch_transactions(token, league_key, team_key):
 
     trades = []
     waivers = []
+    drops = []
     count = trans_raw.get("count", 0)
     print(f"共 {count} 筆")
 
@@ -574,6 +575,7 @@ def fetch_transactions(token, league_key, team_key):
                     "dest_key": p_tx.get("destination_team_key", ""),
                     "src_type": p_tx.get("source_type", ""),
                     "src_team": p_tx.get("source_team_name", ""),
+                    "src_key":  p_tx.get("source_team_key", ""),
                 })
 
             if t_type == "trade":
@@ -592,17 +594,21 @@ def fetch_transactions(token, league_key, team_key):
                     })
 
             else:
-                # 【關鍵修正】只要不是交易，且球員的最終目的地是我們的球隊，就一律視為「撿人」 (包含 FA 與 Waiver)
                 for p in players_involved:
                     if p["dest_key"] == team_key and p["dest_type"] == "team":
                         waivers.append({
                             "date": ts_str, "timestamp": t_ts,
                             "player": p["name"], "player_key": p["player_key"],
                         })
+                    elif p["src_key"] == team_key and p["src_type"] == "team":
+                        drops.append({
+                            "timestamp": t_ts,
+                            "player": p["name"],
+                        })
         except Exception:
             continue
 
-    return trades, waivers
+    return trades, waivers, drops
 
 
 def lookup_player_key(token, league_key, player_name):
@@ -658,6 +664,17 @@ def date_str_to_timestamp(date_str):
         return int(dt.timestamp())
     except (ValueError, TypeError):
         return 0
+
+
+def ts_to_last_week_before(drop_ts, week_ts_list):
+    """找出 drop_ts 前最後一個已開始的週次（即球員那段在陣的最後一週）。"""
+    last_week = None
+    for week, ts in week_ts_list:
+        if ts <= drop_ts:
+            last_week = week
+        else:
+            break
+    return last_week
 
 
 def ts_to_first_week_after(trade_ts, week_ts_list):
@@ -826,7 +843,7 @@ def calc_trade_roi(token, league_key, trades, player_weekly_detail, week_dates, 
 
 # ==================== Waiver 撿人評估 ====================
 
-def calc_waiver_roi(waivers, player_weekly_detail, week_dates, stat_cols):
+def calc_waiver_roi(waivers, drops, player_weekly_detail, week_dates, stat_cols):
     """
     對每筆撿人計算：從撿入那週起，該球員在我陣上的累積數據與週均。
     同一個球員可能被撿入多次，各自計算。
@@ -842,21 +859,37 @@ def calc_waiver_roi(waivers, player_weekly_detail, week_dates, stat_cols):
     for r in player_weekly_detail:
         player_lookup[r["name"]][r["week"]] = r
 
+    # 建立放棄紀錄查詢表：player_name -> 放棄 timestamp 清單（排序）
+    drop_lookup = defaultdict(list)
+    for d in drops:
+        if d.get("player"):
+            drop_lookup[d["player"]].append(d["timestamp"])
+    for name in drop_lookup:
+        drop_lookup[name].sort()
+
     waiver_results = []
 
     for waiver in waivers:
         name = waiver.get("player")
         if not name: continue
 
-        first_week = ts_to_first_week_after(waiver["timestamp"], week_ts_list)
+        pickup_ts = waiver["timestamp"]
+        first_week = ts_to_first_week_after(pickup_ts, week_ts_list)
         if first_week is None: continue
 
-        # 加總從撿入週起，球員在我陣上的數據
+        # 找這次撿入後的第一次放棄，確定本段在陣的結束週次
+        next_drops = [t for t in drop_lookup.get(name, []) if t > pickup_ts]
+        if next_drops:
+            stint_last_week = ts_to_last_week_before(min(next_drops), week_ts_list)
+        else:
+            stint_last_week = None  # 至今仍在陣，不設上限
+
         totals = defaultdict(float)
         weeks_on_roster = 0
 
         for week, row in sorted(player_lookup[name].items()):
             if week < first_week: continue
+            if stint_last_week is not None and week > stint_last_week: continue
             weeks_on_roster += 1
             for col in compare_cols:
                 totals[col] += to_float(row.get(col, 0))
@@ -1615,7 +1648,7 @@ def main():
         token, league_key, team_key, start_week, end_week, stat_cols, stat_map)
 
     print(f"\n【3/5】交易與 Waiver 紀錄...")
-    trades, waivers = fetch_transactions(token, league_key, team_key)
+    trades, waivers, drops = fetch_transactions(token, league_key, team_key)
 
     print(f"\n【4/5】計算交易 ROI...")
     roi_results, compare_cols = calc_trade_roi(
@@ -1625,7 +1658,7 @@ def main():
 
     print(f"\n【5/5】計算 Waiver 撿人評估...")
     waiver_results, waiver_compare_cols = calc_waiver_roi(
-        waivers, player_weekly_detail, week_dates, stat_cols)
+        waivers, drops, player_weekly_detail, week_dates, stat_cols)
     print(f"  共 {len(waiver_results)} 筆撿人紀錄分析完成")
 
     if not player_totals:
