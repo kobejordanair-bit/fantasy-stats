@@ -1324,8 +1324,7 @@ tr:hover td {{ background: #263548; }}
   <div class="tab active" onclick="showPanel('stats',this)">📊 球員統計</div>
   <div class="tab" onclick="showPanel('matchups',this)">⚔️ 對戰記錄</div>
   <div class="tab" onclick="showPanel('categories',this)">🏆 類別勝率</div>
-  <div class="tab" onclick="showPanel('trades',this)">🔄 交易紀錄</div>
-  <div class="tab" onclick="showPanel('roi',this)">📈 交易 ROI</div>
+  <div class="tab" onclick="showPanel('trades',this)">🔄 交易分析</div>
   <div class="tab" onclick="showPanel('waiver',this)">🎯 FA/Waiver 評估</div>
   <div class="tab" onclick="showPanel('leaders',this)">🏅 數據王</div>
   <div class="tab" onclick="showPanel('mvp',this)">🧮 MVP</div>
@@ -1367,19 +1366,12 @@ tr:hover td {{ background: #263548; }}
 
 <div id="panel-trades" class="panel">
   <div class="card">
-    <div class="card-head"><h2>🔄 交易紀錄</h2></div>
-    <table><thead><tr><th>時間</th><th>交易對手</th><th>我方收到</th><th>我方送出</th></tr></thead>
-    <tbody id="tradeBody"></tbody></table>
-  </div>
-</div>
-
-<div id="panel-roi" class="panel">
-  <div class="card">
-    <div class="card-head"><h2>📈 交易 ROI — 逐類別比較</h2></div>
+    <div class="card-head"><h2>🔄 交易分析</h2></div>
     <p style="color:#64748b;font-size:0.82rem;margin-bottom:16px">
-      我方收到：交易後在我陣上的累積數據｜我方送出：交易後的實際表現（不限隊伍）
+      <b style="color:#34d399">我方收到</b>：交易後在我陣上的累積數據｜<b style="color:#f87171">我方送出</b>：交易後的實際表現（不限隊伍）。
+      賽季末期交易若數據不足則僅顯示紀錄。
     </p>
-    <div id="roiList"></div>
+    <div id="tradeList"></div>
   </div>
 </div>
 
@@ -1522,16 +1514,10 @@ D.catRecord.forEach(c => {{
     <div class="bar-bg"><div class="bar-fill" style="width:${{pct}}%"></div></div></div>`;
 }});
 
-const trBody = document.getElementById('tradeBody');
-D.trades.forEach(t => {{
-  trBody.innerHTML += `<tr>
-    <td style="color:#64748b;font-size:0.8rem">${{t.date}}</td>
-    <td>${{t.opponent}}</td>
-    <td style="color:#34d399">${{t.received}}</td>
-    <td style="color:#f87171">${{t.sent}}</td></tr>`;
-}});
+// 交易分析（合併交易紀錄 + ROI）
+const tradeList = document.getElementById('tradeList');
+const roiKeySet = new Set(D.roiData.map(r => r.date + '|' + r.opponent + '|' + r.received + '|' + r.sent));
 
-const roiList = document.getElementById('roiList');
 D.roiData.forEach(r => {{
   const cls = r.overall==='我方優'?'badge-我方優':r.overall==='對方優'?'badge-對方優':'badge-平';
   let catsHtml = '<div class="cat-grid">';
@@ -1548,7 +1534,7 @@ D.roiData.forEach(r => {{
     </div>`;
   }});
   catsHtml += '</div>';
-  roiList.innerHTML += `<div class="roi-card">
+  tradeList.innerHTML += `<div class="roi-card">
     <div class="roi-header">
       <div>
         <div style="font-size:0.75rem;color:#64748b;margin-bottom:4px">
@@ -1568,6 +1554,26 @@ D.roiData.forEach(r => {{
       </div>
     </div>
     ${{catsHtml}}
+  </div>`;
+}});
+
+D.trades.forEach(t => {{
+  const key = t.date + '|' + t.opponent + '|' + t.received + '|' + t.sent;
+  if (roiKeySet.has(key)) return;
+  tradeList.innerHTML += `<div class="roi-card">
+    <div class="roi-header">
+      <div>
+        <div style="font-size:0.75rem;color:#64748b;margin-bottom:4px">
+          ${{t.date}} · 對手：${{t.opponent}}
+        </div>
+        <div style="font-size:0.85rem">
+          <span style="color:#34d399">收：${{t.received}}</span>
+          <span style="color:#475569;margin:0 8px">⟺</span>
+          <span style="color:#f87171">送：${{t.sent}}</span>
+        </div>
+      </div>
+      <div style="text-align:right;color:#64748b;font-size:0.8rem">ROI 資料不足</div>
+    </div>
   </div>`;
 }});
 
