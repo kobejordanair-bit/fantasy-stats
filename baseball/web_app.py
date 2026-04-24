@@ -4,7 +4,7 @@ Yahoo Fantasy Baseball 交易分析器 - Web 介面
 啟動後自動開啟瀏覽器，可在網頁上直接輸入球員進行交易分析。
 
 使用前請確認 Yahoo Developer App 的 Redirect URI 包含：
-    http://localhost:5000/callback
+    https://localhost:5000/callback
 """
 
 import os, sys, secrets, threading, webbrowser
@@ -23,7 +23,7 @@ from baseball_trade_analyzer import (
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 
-WEB_REDIRECT_URI = "http://localhost:5000/callback"
+WEB_REDIRECT_URI = "https://localhost:5000/callback"
 
 _store = {}   # token, leagues, stat_maps
 
@@ -455,7 +455,7 @@ if __name__ == "__main__":
     print("Yahoo Fantasy Baseball 交易分析器 - Web 介面")
     print("=" * 55)
     print("重要：請確認 Yahoo Developer App 的 Redirect URI 已加入：")
-    print("  http://localhost:5000/callback")
+    print("  https://localhost:5000/callback")
     print("=" * 55)
-    threading.Timer(1.2, lambda: webbrowser.open("http://localhost:5000")).start()
-    app.run(host="localhost", port=5000, debug=False)
+    threading.Timer(1.2, lambda: webbrowser.open("https://localhost:5000")).start()
+    app.run(host="localhost", port=5000, debug=False, ssl_context="adhoc")
