@@ -390,6 +390,116 @@ def compare_stats(give_stats, get_stats, cats, negative_cats, label_give, label_
     return results, my_win, my_lose, tie
 
 
+def sum_stats(players_stats_dict, period):
+    """合計多位球員的統計數據（平均類別取最後一位球員的值）"""
+    totals = defaultdict(float)
+    for pname, periods in players_stats_dict.items():
+        for cat, val in periods.get(period, {}).items():
+            if cat not in AVG_CATS:
+                totals[cat] += to_float(val)
+    for pname, periods in players_stats_dict.items():
+        for cat in AVG_CATS:
+            if cat in periods.get(period, {}):
+                totals[cat] = to_float(periods[period][cat])
+    return dict(totals)
+
+
+def search_players_web(token, league_key, name):
+    """搜尋球員，回傳 [{"key", "name", "position"}, ...] 不做任何 IO"""
+    try:
+        search = name.replace(" ", "%20")
+        data = api_get(token, f"/league/{league_key}/players;search={search}", retries=2)
+
+        def find_players_block(obj):
+            if isinstance(obj, dict):
+                if "0" in obj and isinstance(obj["0"], dict) and "player" in obj["0"]:
+                    return obj
+                for v in obj.values():
+                    r = find_players_block(v)
+                    if r:
+                        return r
+            elif isinstance(obj, list):
+                for item in obj:
+                    r = find_players_block(item)
+                    if r:
+                        return r
+            return None
+
+        players = find_players_block(data)
+        if not players or players.get("count", 0) == 0:
+            return []
+
+        results = []
+        for i in range(min(players["count"], 8)):
+            p = players[str(i)]["player"][0]
+            pkey = pname = pos = team = None
+            for attr in p:
+                if isinstance(attr, dict):
+                    if "player_key" in attr:
+                        pkey = attr["player_key"]
+                    if "name" in attr and isinstance(attr["name"], dict):
+                        pname = attr["name"].get("full")
+                    if "display_position" in attr:
+                        pos = attr["display_position"]
+                    if "editorial_team_abbr" in attr:
+                        team = attr["editorial_team_abbr"]
+            if pkey and pname:
+                results.append({"key": pkey, "name": pname,
+                                 "position": pos or "", "team": team or ""})
+        return results
+    except Exception:
+        return []
+
+
+def run_analysis(token, league_key, league_cfg, stat_map, give_players, get_players):
+    """
+    Web 版分析函式，不做任何 print/input。
+    give_players / get_players: [{"key": ..., "name": ...}, ...]
+    回傳 JSON-serializable dict。
+    """
+    batter_cats  = league_cfg["batter_cats"]
+    pitcher_cats = league_cfg["pitcher_cats"]
+    negative     = league_cfg["negative"]
+
+    give_label = " + ".join(p["name"] for p in give_players)
+    get_label  = " + ".join(p["name"] for p in get_players)
+
+    give_stats_all, get_stats_all = {}, {}
+    for p in give_players:
+        give_stats_all[p["name"]] = fetch_all_stats_for_player(
+            token, league_key, p["key"], p["name"], stat_map)
+    for p in get_players:
+        get_stats_all[p["name"]] = fetch_all_stats_for_player(
+            token, league_key, p["key"], p["name"], stat_map)
+
+    periods = ["本季", "近14天", "近30天", "上季"]
+    result = {"give": give_label, "get": get_label, "analysis": {}, "players": {}}
+
+    for period in periods:
+        give_t = sum_stats(give_stats_all, period)
+        get_t  = sum_stats(get_stats_all,  period)
+        b_res, b_w, b_l, b_t = compare_stats(
+            give_t, get_t, batter_cats, negative, give_label, get_label)
+        p_res, p_w, p_l, p_t = compare_stats(
+            give_t, get_t, pitcher_cats, negative, give_label, get_label)
+        result["analysis"][period] = {
+            "batter":  {"win": b_w, "lose": b_l, "tie": b_t, "detail": b_res},
+            "pitcher": {"win": p_w, "lose": p_l, "tie": p_t, "detail": p_res},
+            "overall_win":  b_w + p_w,
+            "overall_lose": b_l + p_l,
+            "overall_tie":  b_t + p_t,
+        }
+
+    for pname, p_periods in list(give_stats_all.items()) + list(get_stats_all.items()):
+        side = "give" if pname in [p["name"] for p in give_players] else "get"
+        result["players"][pname] = {
+            "side": side,
+            "stats": {period: p_periods.get(period, {}) for period in periods},
+        }
+
+    return result
+
+
 def fetch_all_stats_for_player(token, league_key, player_key, player_name, stat_map):
     """抓取一位球員的本季、最近14天、最近30天、上季數據"""
     print(f"    抓取 {player_name} 的數據...", end=" ", flush=True)
@@ -489,20 +599,6 @@ def analyze_trade(token, league_key, league_cfg, stat_map):
 
     for pkey, pname in get_players:
         get_stats_all[pname] = fetch_all_stats_for_player(token, league_key, pkey, pname, stat_map)
-
-    # 合計多球員數據
-    def sum_stats(players_stats_dict, period):
-        totals = defaultdict(float)
-        for pname, periods in players_stats_dict.items():
-            for cat, val in periods.get(period, {}).items():
-                if cat not in AVG_CATS:
-                    totals[cat] += to_float(val)
-        # 平均類別不能直接加總，取最後一個球員的（多球員交易時僅供參考）
-        for pname, periods in players_stats_dict.items():
-            for cat in AVG_CATS:
-                if cat in periods.get(period, {}):
-                    totals[cat] = to_float(periods[period][cat])
-        return dict(totals)
 
     periods = ["本季", "近14天", "近30天", "上季"]
 
