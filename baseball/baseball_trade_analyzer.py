@@ -369,6 +369,8 @@ def compare_stats(give_stats, get_stats, cats, negative_cats, label_give, label_
         r_val = to_float(get_stats.get(cat, 0))
 
         is_negative = cat in negative_cats
+        winner: str
+        outcome: str
         if g_val == r_val:
             winner = "平"
             outcome = "tie"
