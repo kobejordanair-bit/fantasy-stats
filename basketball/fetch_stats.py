@@ -796,7 +796,7 @@ def calc_trade_roi(token, league_key, trades, player_weekly_detail, week_dates, 
 
 # ==================== Waiver 撿人評估 ====================
 
-def calc_waiver_roi(waivers, player_weekly_detail, week_dates, stat_cols, global_name_to_pkey):
+def calc_waiver_roi(waivers, player_weekly_detail, week_dates, stat_cols):
     """
     對每筆撿人計算：從撿入那週起，該球員在我陣上的累積數據與週均。
     同一個球員可能被撿入多次，各自計算。
@@ -824,7 +824,6 @@ def calc_waiver_roi(waivers, player_weekly_detail, week_dates, stat_cols, global
         # 加總從撿入週起，球員在我陣上的數據
         totals = defaultdict(float)
         weeks_on_roster = 0
-        made_att = defaultdict(lambda: [0.0, 0.0])
 
         for week, row in sorted(player_lookup[name].items()):
             if week < first_week: continue
@@ -1385,7 +1384,7 @@ D.waiverData.forEach((r, idx) => {{
 def main():
     print("Yahoo Fantasy Basketball 整季完整分析")
     print("=" * 55)
-    if CLIENT_ID == "填入你的_Client_ID":
+    if not CLIENT_ID or not CLIENT_SECRET:
         print("⚠️  請先填入 CLIENT_ID 和 CLIENT_SECRET")
         return
 
@@ -1434,7 +1433,7 @@ def main():
 
     print(f"\n【5/5】計算 Waiver 撿人評估...")
     waiver_results, waiver_compare_cols = calc_waiver_roi(
-        waivers, player_weekly_detail, week_dates, stat_cols, global_name_to_pkey)
+        waivers, player_weekly_detail, week_dates, stat_cols)
     print(f"  共 {len(waiver_results)} 筆撿人紀錄分析完成")
 
     if not player_totals:
