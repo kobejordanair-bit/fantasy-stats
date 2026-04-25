@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
 Yahoo Fantasy Baseball 交易分析器 - Web 介面
-啟動後自動開啟瀏覽器，可在網頁上直接輸入球員進行交易分析。
-
-使用前請確認 Yahoo Developer App 的 Redirect URI 包含：
-    https://localhost:5000/callback
+授權方式與籃球版相同：開啟 Yahoo 授權後把跳轉網址貼回頁面，不需要 HTTPS。
 """
 
 import os, sys, secrets, threading, webbrowser
+from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from flask import Flask, request, session, jsonify, redirect
+from flask import Flask, request, jsonify, redirect
 import requests as http
 
 from baseball_trade_analyzer import (
@@ -23,11 +21,102 @@ from baseball_trade_analyzer import (
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
 
-WEB_REDIRECT_URI = "https://localhost:5000/callback"
+# 與籃球版共用同一個 redirect URI，不需要本地 HTTPS
+WEB_REDIRECT_URI = "https://localhost:8080"
 
 _store = {}   # token, leagues, stat_maps
 
-# ── HTML ──────────────────────────────────────────────────────────────────────
+# ── 授權頁面 ──────────────────────────────────────────────────────────────────
+
+AUTH_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>授權 - 交易分析器</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #0f172a; color: #e2e8f0; min-height: 100vh;
+         display: flex; align-items: center; justify-content: center; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px;
+          padding: 40px; max-width: 480px; width: 100%; }
+  h1 { font-size: 1.3rem; margin-bottom: 8px; }
+  .sub { color: #64748b; font-size: .9rem; margin-bottom: 28px; }
+  .step { display: flex; gap: 12px; margin-bottom: 20px; align-items: flex-start; }
+  .step-num { background: #0ea5e9; color: #fff; border-radius: 50%;
+              width: 24px; height: 24px; display: flex; align-items: center;
+              justify-content: center; font-size: .8rem; font-weight: 700; flex-shrink: 0; }
+  .step-text { font-size: .9rem; color: #cbd5e1; line-height: 1.5; }
+  .auth-btn { display: block; width: 100%; padding: 12px;
+              background: linear-gradient(135deg, #0ea5e9, #6366f1);
+              border: none; border-radius: 10px; color: #fff; font-size: 1rem;
+              font-weight: 600; cursor: pointer; margin: 24px 0 20px; text-align: center;
+              text-decoration: none; }
+  .auth-btn:hover { opacity: .88; }
+  .paste-wrap { display: none; }
+  .paste-wrap label { font-size: .85rem; color: #94a3b8; display: block; margin-bottom: 6px; }
+  .paste-wrap input { width: 100%; background: #0f172a; border: 1px solid #334155;
+                      color: #e2e8f0; padding: 10px 12px; border-radius: 8px;
+                      font-size: .85rem; outline: none; }
+  .paste-wrap input:focus { border-color: #0ea5e9; }
+  .confirm-btn { display: block; width: 100%; padding: 11px; margin-top: 10px;
+                 background: #0ea5e9; border: none; border-radius: 8px;
+                 color: #fff; font-size: .95rem; font-weight: 600; cursor: pointer; }
+  .confirm-btn:hover { background: #0284c7; }
+  #err { color: #f87171; font-size: .85rem; margin-top: 8px; display: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>⚾ 交易分析器</h1>
+  <p class="sub">Yahoo Fantasy Baseball — 首次使用需授權</p>
+
+  <div class="step">
+    <div class="step-num">1</div>
+    <div class="step-text">點下方按鈕，在新分頁登入 Yahoo 並允許授權</div>
+  </div>
+  <div class="step">
+    <div class="step-num">2</div>
+    <div class="step-text">授權後會跳到一個<strong>無法連線</strong>的頁面，把瀏覽器<strong>網址列的完整網址</strong>複製起來</div>
+  </div>
+  <div class="step">
+    <div class="step-num">3</div>
+    <div class="step-text">貼到下方輸入框，按確認</div>
+  </div>
+
+  <a id="auth-link" class="auth-btn" href="{auth_url}" target="_blank"
+     onclick="document.querySelector('.paste-wrap').style.display='block'">
+    開啟 Yahoo 授權頁面
+  </a>
+
+  <div class="paste-wrap">
+    <label>貼上授權後的完整網址</label>
+    <input id="url-input" type="text" placeholder="https://localhost:8080/?code=...">
+    <button class="confirm-btn" onclick="submitUrl()">確認授權</button>
+    <div id="err"></div>
+  </div>
+</div>
+<script>
+async function submitUrl() {
+  const url = document.getElementById("url-input").value.trim();
+  const err = document.getElementById("err");
+  err.style.display = "none";
+  if (!url) { err.textContent = "請貼上網址"; err.style.display = "block"; return; }
+  const r = await fetch("/api/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  const data = await r.json();
+  if (data.ok) { window.location = "/"; }
+  else { err.textContent = data.error || "授權失敗，請重試"; err.style.display = "block"; }
+}
+</script>
+</body>
+</html>"""
+
+# ── 主頁面 ────────────────────────────────────────────────────────────────────
 
 HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
@@ -245,7 +334,7 @@ function renderChips(players, chipsEl) {
 
 document.getElementById("analyze-btn").addEventListener("click", async () => {
   const leagueKey = getLeagueKey();
-  if (!leagueKey)      return showError("請先選擇聯盟");
+  if (!leagueKey)          return showError("請先選擇聯盟");
   if (!givePlayers.length) return showError("請加入至少一位「送出」球員");
   if (!getPlayers.length)  return showError("請加入至少一位「收到」球員");
   clearError();
@@ -272,7 +361,7 @@ document.getElementById("analyze-btn").addEventListener("click", async () => {
 });
 
 function renderResults(data) {
-  const periods = ["本季", "近14天", "近30天", "上季"];
+  const periods = ["本季", "近14天", "近30天"];
   const giveLabel = data.give, getLabel = data.get;
 
   let html = `<div class="result-header">
@@ -375,24 +464,28 @@ def index():
 def auth():
     if not CLIENT_ID:
         return "請先設定 YAHOO_CLIENT_ID 環境變數", 500
-    url = (f"{AUTH_URL}?client_id={CLIENT_ID}"
-           f"&redirect_uri={WEB_REDIRECT_URI}&response_type=code")
-    return redirect(url)
+    auth_url = (f"{AUTH_URL}?client_id={CLIENT_ID}"
+                f"&redirect_uri={WEB_REDIRECT_URI}&response_type=code")
+    return AUTH_HTML.replace("{auth_url}", auth_url)
 
 
-@app.route("/callback")
-def callback():
-    code = request.args.get("code")
+@app.route("/api/token", methods=["POST"])
+def api_token():
+    body = request.get_json(force=True)
+    redirect_url = body.get("url", "").strip()
+    code = parse_qs(urlparse(redirect_url).query).get("code", [None])[0]
     if not code:
-        return "授權失敗：找不到 code", 400
+        return jsonify({"error": "網址中找不到 code，請確認貼上的是授權後的完整網址"}), 400
     resp = http.post(TOKEN_URL,
                      data={"grant_type": "authorization_code", "code": code,
                            "redirect_uri": WEB_REDIRECT_URI},
                      auth=(CLIENT_ID, CLIENT_SECRET))
     if resp.status_code != 200:
-        return f"Token 取得失敗：{resp.text}", 400
+        return jsonify({"error": f"Token 取得失敗：{resp.text}"}), 400
     _store["token"] = resp.json()["access_token"]
-    return redirect("/")
+    _store.pop("leagues", None)
+    _store.pop("stat_maps", None)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/leagues")
@@ -424,8 +517,8 @@ def api_analyze():
         return jsonify({"error": "未授權"}), 401
 
     body = request.get_json(force=True)
-    league_key  = body.get("league_key", "")
-    give_players = body.get("give", [])   # [{"key": ..., "name": ...}]
+    league_key   = body.get("league_key", "")
+    give_players = body.get("give", [])
     get_players  = body.get("get",  [])
 
     if not league_key or not give_players or not get_players:
@@ -454,8 +547,5 @@ if __name__ == "__main__":
     print("=" * 55)
     print("Yahoo Fantasy Baseball 交易分析器 - Web 介面")
     print("=" * 55)
-    print("重要：請確認 Yahoo Developer App 的 Redirect URI 已加入：")
-    print("  https://localhost:5000/callback")
-    print("=" * 55)
-    threading.Timer(1.2, lambda: webbrowser.open("https://localhost:5000")).start()
-    app.run(host="localhost", port=5000, debug=False, ssl_context="adhoc")
+    threading.Timer(1.0, lambda: webbrowser.open("http://localhost:5000")).start()
+    app.run(host="localhost", port=5000, debug=False)

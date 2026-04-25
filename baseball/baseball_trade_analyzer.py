@@ -478,7 +478,7 @@ def run_analysis(token, league_key, league_cfg, stat_map, give_players, get_play
         get_stats_all[p["name"]] = fetch_all_stats_for_player(
             token, league_key, p["key"], p["name"], stat_map)
 
-    periods = ["本季", "近14天", "近30天", "上季"]
+    periods = ["本季", "近14天", "近30天"]
     result = {"give": give_label, "get": get_label, "analysis": {}, "players": {}}
 
     for period in periods:
@@ -507,7 +507,6 @@ def run_analysis(token, league_key, league_cfg, stat_map, give_players, get_play
 
 
 def fetch_all_stats_for_player(token, league_key, player_key, player_name, stat_map):
-    """抓取一位球員的本季、最近14天、最近30天、上季數據"""
     print(f"    抓取 {player_name} 的數據...", end=" ", flush=True)
     stats = {}
 
@@ -516,8 +515,6 @@ def fetch_all_stats_for_player(token, league_key, player_key, player_name, stat_
     stats["近14天"] = fetch_player_stats(token, league_key, player_key, "last_week", stat_map)
     time.sleep(0.3)
     stats["近30天"] = fetch_player_stats(token, league_key, player_key, "last_month", stat_map)
-    time.sleep(0.3)
-    stats["上季"] = fetch_player_prev_season_stats(token, player_key, stat_map)
     time.sleep(0.3)
 
     print("✓")
@@ -602,7 +599,7 @@ def analyze_trade(token, league_key, league_cfg, stat_map):
     for pkey, pname in get_players:
         get_stats_all[pname] = fetch_all_stats_for_player(token, league_key, pkey, pname, stat_map)
 
-    periods = ["本季", "近14天", "近30天", "上季"]
+    periods = ["本季", "近14天", "近30天"]
 
     print("\n" + "=" * 50)
     give_label = " + ".join(p[1] for p in give_players)
