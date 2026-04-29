@@ -952,8 +952,11 @@ def fetch_savant_percentiles(mlbam_id: int, player_type: str, player_name: str =
         sections = _calc_statcast_percentiles(mlbam_id, player_name, player_type, season)
         if sections:
             label = "" if season == year else f"（{season} 年，本季出賽不足）"
+            all_pcts = [st["percentile"] for sec in sections for st in sec["stats"]]
+            composite = round(sum(all_pcts) / len(all_pcts)) if all_pcts else None
             return {"mlbam_id": mlbam_id, "player_type": player_type,
-                    "sections": sections, "season_label": label}
+                    "sections": sections, "season_label": label,
+                    "composite_score": composite}
     return {"error": "無法取得百分位數據（出賽不足或查無此人）"}
 
 
@@ -1205,23 +1208,47 @@ def fetch_fangraphs_stats(player_name: str, player_type: str, season: int = 0) -
 
 def fetch_splits_statcast(mlbam_id: int, player_type: str,
                           start_dt: str = "", end_dt: str = "") -> dict:
-    """用 Statcast 原始逐打席數據計算本季 vs LHP/RHP splits"""
-    import datetime
+    """用 Statcast 原始逐打席數據計算本季 vs LHP/RHP splits，大區間自動分批抓取"""
+    import datetime, pandas as pd
     if not start_dt:
         start_dt = f"{datetime.date.today().year}-03-20"
     if not end_dt:
         end_dt = datetime.date.today().strftime("%Y-%m-%d")
-    try:
-        if player_type == "batter":
-            from pybaseball import statcast_batter
-            df = statcast_batter(start_dt, end_dt, player_id=mlbam_id)
-            return _batter_platoon(df)
-        else:
-            from pybaseball import statcast_pitcher
-            df = statcast_pitcher(start_dt, end_dt, player_id=mlbam_id)
-            return _pitcher_platoon(df)
-    except Exception as e:
-        return {"error": str(e)}
+
+    chunks = _date_chunks(start_dt, end_dt)
+    frames = []
+    for s, e in chunks:
+        try:
+            if player_type == "batter":
+                from pybaseball import statcast_batter
+                df = statcast_batter(s, e, player_id=mlbam_id)
+            else:
+                from pybaseball import statcast_pitcher
+                df = statcast_pitcher(s, e, player_id=mlbam_id)
+            if df is not None and not df.empty:
+                frames.append(df)
+        except Exception as exc:
+            print(f"[splits] {s}~{e} 抓取失敗: {exc}", flush=True)
+            continue
+
+    if not frames:
+        return {}
+    combined = pd.concat(frames, ignore_index=True)
+    return _batter_platoon(combined) if player_type == "batter" else _pitcher_platoon(combined)
+
+
+def _date_chunks(start_dt: str, end_dt: str, chunk_days: int = 28):
+    """把日期區間切成不超過 chunk_days 天的小段，回傳 (start, end) 字串 list"""
+    import datetime
+    start = datetime.date.fromisoformat(start_dt)
+    end   = datetime.date.fromisoformat(end_dt)
+    chunks = []
+    cur = start
+    while cur <= end:
+        chunk_end = min(cur + datetime.timedelta(days=chunk_days - 1), end)
+        chunks.append((cur.isoformat(), chunk_end.isoformat()))
+        cur = chunk_end + datetime.timedelta(days=1)
+    return chunks
 
 
 def _batter_platoon(df) -> dict:
@@ -1327,6 +1354,65 @@ def fetch_date_range_stats(player_name: str, player_type: str,
         return {}
     except Exception as e:
         return {"error": str(e)}
+
+
+def fetch_player_trend(player_name: str, player_type: str) -> dict:
+    """本季 vs 去年同指標比較，回傳 {seasons, trend, year}"""
+    import datetime
+    year = datetime.date.today().year
+    neg  = {"ERA", "FIP", "xFIP", "K%", "BB%"}   # 數值越低越好
+    seasons: dict = {}
+
+    for season in [year, year - 1]:
+        try:
+            if player_type == "batter":
+                from pybaseball import batting_stats
+                with _pybaseball_lock:
+                    df = batting_stats(season, qual=1)
+                want = ["G", "PA", "wRC+", "wOBA", "K%", "BB%", "ISO", "WAR"]
+            else:
+                from pybaseball import pitching_stats
+                with _pybaseball_lock:
+                    df = pitching_stats(season, qual=1)
+                want = ["G", "IP", "ERA", "FIP", "K%", "BB%", "K-BB%", "WAR"]
+            if df is None or df.empty:
+                continue
+            row = _find_by_name(df, player_name)
+            if row is None:
+                continue
+            data = {}
+            for col in want:
+                if col in row.index:
+                    try:
+                        data[col] = round(float(row[col]), 3)
+                    except Exception:
+                        pass
+            if data:
+                seasons[str(season)] = data
+        except Exception as e:
+            print(f"[trend] {player_name} {season} 失敗: {e}", flush=True)
+
+    if len(seasons) < 2:
+        return {"seasons": seasons, "trend": {}, "year": year}
+
+    curr = seasons.get(str(year), {})
+    prev = seasons.get(str(year - 1), {})
+    trend = {}
+    for col in curr:
+        if col not in prev or prev[col] == 0:
+            continue
+        delta_pct = (curr[col] - prev[col]) / abs(prev[col]) * 100
+        improving = (delta_pct > 5) != (col in neg)
+        if abs(delta_pct) < 5:
+            arrow = "→"
+        elif improving:
+            arrow = "↑"
+        else:
+            arrow = "↓"
+        trend[col] = {"current": curr[col], "prev": prev[col],
+                      "delta_pct": round(delta_pct, 1), "arrow": arrow}
+
+    return {"seasons": seasons, "trend": trend, "year": year}
 
 
 # ── 主程式 ────────────────────────────────────────────────────────────────────

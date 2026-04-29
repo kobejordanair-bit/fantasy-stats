@@ -17,7 +17,7 @@ from baseball_trade_analyzer import (
     get_my_team_key, get_team_roster, get_standings,
     fetch_player_stats,
     lookup_mlbam_id, fetch_savant_percentiles, fetch_fangraphs_stats,
-    fetch_splits_statcast, fetch_date_range_stats,
+    fetch_splits_statcast, fetch_date_range_stats, fetch_player_trend,
     LEAGUES, CLIENT_ID, CLIENT_SECRET,
     AUTH_URL, TOKEN_URL, AVG_CATS,
     TokenExpiredError,
@@ -346,6 +346,17 @@ HTML = """<!DOCTYPE html>
                          letter-spacing: .06em; margin-bottom: 10px; }
   .trade-adv-side.give > h4 { color: #f87171; }
   .trade-adv-side.get  > h4 { color: #4ade80; }
+  .composite-badge { display: inline-flex; align-items: center; gap: 6px;
+                     padding: 4px 14px; border-radius: 20px; font-weight: 700;
+                     font-size: .92rem; margin-bottom: 10px; }
+  .composite-badge.high { background: rgba(74,222,128,.15); color: #4ade80; }
+  .composite-badge.mid  { background: rgba(251,191,36,.15);  color: #fbbf24; }
+  .composite-badge.low  { background: rgba(248,113,113,.15); color: #f87171; }
+  .trend-row { display: flex; align-items: center; gap: 8px; font-size: .8rem;
+               padding: 3px 0; color: #94a3b8; }
+  .trend-arrow.up   { color: #4ade80; font-size: 1rem; }
+  .trend-arrow.down { color: #f87171; font-size: 1rem; }
+  .trend-arrow.flat { color: #64748b; font-size: 1rem; }
 </style>
 </head>
 <body>
@@ -643,12 +654,20 @@ async function loadTradeAdvanced() {
 
 function renderTradeAdvCard(data) {
   const isP = data.player_type === "pitcher";
+  const sv = data.savant;
+  const tr = data.trend;
+  let compositeHtml = "";
+  if (sv && sv.composite_score != null) {
+    const cs = sv.composite_score;
+    const cls = cs >= 70 ? "high" : cs >= 40 ? "mid" : "low";
+    compositeHtml = `<span class="composite-badge ${cls}" style="font-size:.8rem;padding:3px 10px">綜合 ${cs}</span>`;
+  }
   let html = `<div class="section-card">
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
       <span style="font-weight:700;font-size:1rem;color:#f1f5f9">${data.name}</span>
       <span class="adv-badge ${data.player_type}">${isP ? "投手" : "打者"}</span>
+      ${compositeHtml}
     </div>`;
-  const sv = data.savant;
   if (sv && sv.sections && sv.sections.length) {
     const slabel = sv.season_label ? ` <span style="color:#f59e0b;font-size:.75rem">${sv.season_label}</span>` : "";
     html += `<div class="pct-section-title" style="margin-top:0">Baseball Savant 百分位${slabel}</div>`;
@@ -673,6 +692,19 @@ function renderTradeAdvCard(data) {
     const entries = Object.entries(fg).filter(([k]) => !["Name","Team"].includes(k));
     html += `<div class="pct-section-title">FanGraphs</div>
       <div class="fg-grid">${entries.map(([k,v]) => `<div class="fg-cell"><span class="fg-key">${k}</span><span class="fg-val">${v}</span></div>`).join("")}</div>`;
+  }
+  if (tr && tr.trend && Object.keys(tr.trend).length) {
+    html += `<div class="pct-section-title" style="margin-top:10px">本季 vs 去年趨勢</div>`;
+    html += Object.entries(tr.trend).map(([col, t]) => {
+      const arrowCls = t.arrow === "↑" ? "up" : t.arrow === "↓" ? "down" : "flat";
+      const sign = t.delta_pct > 0 ? "+" : "";
+      return `<div class="trend-row">
+        <span class="trend-arrow ${arrowCls}">${t.arrow}</span>
+        <span style="color:#cbd5e1;min-width:48px">${col}</span>
+        <span>${t.prev} → <strong style="color:#e2e8f0">${t.current}</strong>
+          <span style="font-size:.72rem;color:#64748b"> (${sign}${t.delta_pct}%)</span></span>
+      </div>`;
+    }).join("");
   }
   html += `</div>`;
   return html;
@@ -1012,8 +1044,16 @@ function renderAdvancedStats(data) {
     <span class="adv-badge ${data.player_type}">${isP ? "投手" : "打者"}</span>
   </div>`;
 
-  // Savant 百分位
+  // 綜合評分 badge
   const sv = data.savant;
+  if (sv && sv.composite_score != null) {
+    const cs = sv.composite_score;
+    const cls = cs >= 70 ? "high" : cs >= 40 ? "mid" : "low";
+    const label = cs >= 70 ? "優秀" : cs >= 40 ? "中等" : "偏弱";
+    html += `<div class="composite-badge ${cls}">綜合評分 ${cs} <span style="font-weight:400;font-size:.8rem">${label}</span></div>`;
+  }
+
+  // Savant 百分位
   if (sv && sv.sections && sv.sections.length) {
     const slabel = sv.season_label ? ` <span style="font-weight:400;color:#f59e0b;font-size:.78rem;text-transform:none">${sv.season_label}</span>` : "";
     html += `<div class="section-card"><h3>Baseball Savant 百分位排名${slabel}</h3>`;
@@ -1037,16 +1077,29 @@ function renderAdvancedStats(data) {
     html += `<p style="color:#f87171;margin-bottom:12px">Savant 載入失敗：${sv.error}</p>`;
   }
 
-  // FanGraphs
+  // FanGraphs + 趨勢
   const fg = data.fangraphs;
+  const tr = data.trend;
   if (fg && Object.keys(fg).length) {
     const meta = [fg.Name, fg.Team].filter(Boolean).join(" · ");
     const entries = Object.entries(fg).filter(([k]) => !["Name","Team"].includes(k));
+    const trendHtml = (tr && tr.trend && Object.keys(tr.trend).length) ?
+      Object.entries(tr.trend).map(([col, t]) => {
+        const arrowCls = t.arrow === "↑" ? "up" : t.arrow === "↓" ? "down" : "flat";
+        const sign = t.delta_pct > 0 ? "+" : "";
+        return `<div class="trend-row">
+          <span class="trend-arrow ${arrowCls}">${t.arrow}</span>
+          <span style="color:#cbd5e1;min-width:52px">${col}</span>
+          <span>${t.prev} → <strong style="color:#e2e8f0">${t.current}</strong></span>
+          <span style="font-size:.75rem">(${sign}${t.delta_pct}%)</span>
+        </div>`;
+      }).join("") : "";
     html += `<div class="section-card">
       <h3>FanGraphs 本季${meta ? ` <span style="font-weight:400;color:#94a3b8;text-transform:none;font-size:.85rem">${meta}</span>` : ""}</h3>
       <div class="fg-grid">
         ${entries.map(([k,v]) => `<div class="fg-cell"><span class="fg-key">${k}</span><span class="fg-val">${v}</span></div>`).join("")}
       </div>
+      ${trendHtml ? `<div class="pct-section-title" style="margin-top:12px">本季 vs 去年趨勢</div>${trendHtml}` : ""}
     </div>`;
   }
 
@@ -1265,9 +1318,11 @@ def api_savant():
         return jsonify({"error": f"找不到「{name}」的 MLBAM ID，請確認英文拼寫"}), 404
     savant_data = fetch_savant_percentiles(mlbam_id, player_type, name)
     fg_data     = fetch_fangraphs_stats(name, player_type)
+    trend_data  = fetch_player_trend(name, player_type)
     return jsonify({"name": name, "player_type": player_type,
                     "mlbam_id": mlbam_id,
-                    "savant": savant_data, "fangraphs": fg_data})
+                    "savant": savant_data, "fangraphs": fg_data,
+                    "trend": trend_data})
 
 
 @app.route("/api/splits")
