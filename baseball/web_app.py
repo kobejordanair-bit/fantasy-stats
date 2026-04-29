@@ -883,7 +883,7 @@ function renderAdvancedStats(data) {
 function downloadCSV(filename, rows) {
   const csv = rows.map(r =>
     r.map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")
-  ).join("\n");
+  ).join("\\n");
   const blob = new Blob(["\\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
