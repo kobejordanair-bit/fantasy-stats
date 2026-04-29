@@ -4,10 +4,8 @@ Yahoo Fantasy Baseball 交易分析器 - Web 介面
 授權方式與籃球版相同：開啟 Yahoo 授權後把跳轉網址貼回頁面，不需要 HTTPS。
 """
 
-import os, sys, secrets, threading, webbrowser, time, socket
+import os, sys, secrets, threading, webbrowser, time
 from urllib.parse import urlparse, parse_qs
-
-socket.setdefaulttimeout(20)  # 防止 DNS 卡死
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from flask import Flask, request, jsonify, redirect
