@@ -982,6 +982,132 @@ def fetch_fangraphs_stats(player_name: str, player_type: str, season: int = 0) -
         return {}
 
 
+def fetch_splits_statcast(mlbam_id: int, player_type: str,
+                          start_dt: str = "", end_dt: str = "") -> dict:
+    """用 Statcast 原始逐打席數據計算本季 vs LHP/RHP splits"""
+    import datetime
+    if not start_dt:
+        start_dt = f"{datetime.date.today().year}-03-20"
+    if not end_dt:
+        end_dt = datetime.date.today().strftime("%Y-%m-%d")
+    try:
+        if player_type == "batter":
+            from pybaseball import statcast_batter
+            df = statcast_batter(start_dt, end_dt, player_id=mlbam_id)
+            return _batter_platoon(df)
+        else:
+            from pybaseball import statcast_pitcher
+            df = statcast_pitcher(start_dt, end_dt, player_id=mlbam_id)
+            return _pitcher_platoon(df)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _batter_platoon(df) -> dict:
+    if df is None or df.empty:
+        return {}
+    out = {}
+    for hand, label in [("L", "vs. LHP"), ("R", "vs. RHP")]:
+        sub = df[df["p_throws"] == hand].copy()
+        if sub.empty:
+            continue
+        pa_rows = sub[sub["events"].notna()]
+        pa  = len(pa_rows)
+        h   = int((pa_rows["events"].isin(["single","double","triple","home_run"])).sum())
+        dbl = int((pa_rows["events"] == "double").sum())
+        trp = int((pa_rows["events"] == "triple").sum())
+        hr  = int((pa_rows["events"] == "home_run").sum())
+        k   = int((pa_rows["events"] == "strikeout").sum())
+        bb  = int((pa_rows["events"].isin(["walk","intent_walk"])).sum())
+        hbp = int((pa_rows["events"] == "hit_by_pitch").sum())
+        sf  = int((pa_rows["events"] == "sac_fly").sum())
+        ab  = pa - bb - hbp - sf
+        tb  = (h - dbl - trp - hr) + 2*dbl + 3*trp + 4*hr
+        avg = round(h  / ab,       3) if ab > 0 else 0.0
+        obp = round((h + bb + hbp) / pa, 3) if pa > 0 else 0.0
+        slg = round(tb / ab,       3) if ab > 0 else 0.0
+        evs = sub["launch_speed"].dropna()
+        ev  = round(float(evs.mean()), 1) if len(evs) else None
+        bbe = int(sub["launch_speed"].notna().sum())
+        barrels = int(sub["barrel"].sum()) if "barrel" in sub.columns else 0
+        brl = round(barrels / bbe * 100, 1) if bbe > 0 else None
+        row = {"PA": pa, "AB": ab, "H": h, "HR": hr, "K": k, "BB": bb,
+               "AVG": avg, "OBP": obp, "SLG": slg, "OPS": round(obp + slg, 3)}
+        if ev  is not None: row["Avg EV"] = ev
+        if brl is not None: row["Barrel%"] = brl
+        out[label] = row
+    return out
+
+
+def _pitcher_platoon(df) -> dict:
+    if df is None or df.empty:
+        return {}
+    out = {}
+    for hand, label in [("L", "vs. LHB"), ("R", "vs. RHB")]:
+        sub = df[df["stand"] == hand].copy()
+        if sub.empty:
+            continue
+        pa_rows = sub[sub["events"].notna()]
+        pa  = len(pa_rows)
+        h   = int((pa_rows["events"].isin(["single","double","triple","home_run"])).sum())
+        hr  = int((pa_rows["events"] == "home_run").sum())
+        k   = int((pa_rows["events"] == "strikeout").sum())
+        bb  = int((pa_rows["events"].isin(["walk","intent_walk"])).sum())
+        hbp = int((pa_rows["events"] == "hit_by_pitch").sum())
+        ab  = pa - bb - hbp
+        baa = round(h  / ab, 3) if ab > 0 else 0.0
+        obp = round((h + bb + hbp) / pa, 3) if pa > 0 else 0.0
+        swings = sub["description"].isin([
+            "swinging_strike","foul","foul_tip",
+            "hit_into_play","hit_into_play_score","hit_into_play_no_out"]).sum()
+        whiff = (sub["description"] == "swinging_strike").sum()
+        wh  = round(whiff / swings * 100, 1) if swings > 0 else None
+        evs = sub["launch_speed"].dropna()
+        ev  = round(float(evs.mean()), 1) if len(evs) else None
+        row = {"PA": pa, "AB": ab, "H": h, "HR": hr, "K": k, "BB": bb,
+               "BAA": baa, "OBP": obp,
+               "K%": round(k/pa*100, 1) if pa else 0,
+               "BB%": round(bb/pa*100, 1) if pa else 0}
+        if wh is not None: row["Whiff%"] = wh
+        if ev is not None: row["Avg EV"] = ev
+        out[label] = row
+    return out
+
+
+def fetch_date_range_stats(player_name: str, player_type: str,
+                           start_dt: str, end_dt: str) -> dict:
+    """FanGraphs 任意日期區間成績（pybaseball batting/pitching_stats_range）"""
+    try:
+        if player_type == "batter":
+            from pybaseball import batting_stats_range
+            df   = batting_stats_range(start_dt, end_dt)
+            want = ["Name","Team","G","PA","AVG","OBP","SLG",
+                    "wOBA","wRC+","HR","RBI","SB","K%","BB%","WAR"]
+        else:
+            from pybaseball import pitching_stats_range
+            df   = pitching_stats_range(start_dt, end_dt)
+            want = ["Name","Team","G","GS","IP","W","SV",
+                    "ERA","FIP","WHIP","K%","BB%","K-BB%","WAR"]
+        if df is None or df.empty:
+            return {}
+        parts = player_name.strip().split()
+        for token in [player_name] + parts:
+            mask = df["Name"].str.contains(token, case=False, na=False)
+            if mask.any():
+                row = df[mask].iloc[0]
+                result = {}
+                for c in [col for col in want if col in row.index]:
+                    v = row[c]
+                    try:
+                        result[c] = round(float(v), 3)
+                    except Exception:
+                        result[c] = str(v)
+                return result
+        return {}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ── 主程式 ────────────────────────────────────────────────────────────────────
 
 def main():

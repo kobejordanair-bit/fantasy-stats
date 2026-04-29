@@ -17,6 +17,7 @@ from baseball_trade_analyzer import (
     get_my_team_key, get_team_roster, get_standings,
     fetch_player_stats,
     lookup_mlbam_id, fetch_savant_percentiles, fetch_fangraphs_stats,
+    fetch_splits_statcast, fetch_date_range_stats,
     LEAGUES, CLIENT_ID, CLIENT_SECRET,
     AUTH_URL, TOKEN_URL, AVG_CATS,
 )
@@ -254,6 +255,9 @@ HTML = """<!DOCTYPE html>
              min-width: 68px; text-align: center; }
   .fg-key  { display: block; font-size: .7rem; color: #64748b; margin-bottom: 3px; }
   .fg-val  { display: block; font-size: .95rem; font-weight: 700; color: #f1f5f9; }
+  .date-input { background: #0f172a; border: 1px solid #334155; color: #e2e8f0;
+                padding: 7px 10px; border-radius: 7px; font-size: .88rem; outline: none; }
+  .date-input:focus { border-color: #0ea5e9; }
 </style>
 </head>
 <body>
@@ -341,6 +345,17 @@ HTML = """<!DOCTYPE html>
       <div class="spinner"></div><p style="margin-top:10px">抓取進階數據中，請稍候...</p>
     </div>
     <div id="adv-content"></div>
+    <!-- 自訂日期區間（選完球員後可用） -->
+    <div class="section-card" style="margin-top:16px" id="date-range-card">
+      <h3>自訂區間成績 <span style="font-weight:400;color:#64748b;font-size:.8rem;text-transform:none">（FanGraphs）</span></h3>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px">
+        <input type="date" id="range-start" class="date-input">
+        <span style="color:#64748b">—</span>
+        <input type="date" id="range-end" class="date-input">
+        <button class="load-btn" onclick="loadDateRange()">查詢</button>
+      </div>
+      <div id="date-range-content" style="color:#64748b;font-size:.85rem">請先選擇球員，再設定日期區間</div>
+    </div>
   </div>
 </main>
 
@@ -628,7 +643,7 @@ function renderStandings(data) {
 }
 
 // ── 進階數據 ─────────────────────────────────────────────────────────────────
-let advPlayer = null;
+let advPlayer = null, advMlbamId = null;
 
 function setupAdvSearch() {
   const input    = document.getElementById("adv-search");
@@ -650,7 +665,11 @@ function setupAdvSearch() {
       ).join("");
       dropdown.querySelectorAll(".dropdown-item").forEach(item => {
         item.addEventListener("click", () => {
-          advPlayer = { key: item.dataset.key, name: item.dataset.name, position: item.dataset.pos };
+          const pitcherPos = ["SP","RP","P"];
+          const ptype = pitcherPos.some(p => item.dataset.pos.toUpperCase().includes(p)) ? "pitcher" : "batter";
+          advPlayer = { key: item.dataset.key, name: item.dataset.name,
+                        position: item.dataset.pos, player_type: ptype };
+          advMlbamId = null;
           input.value = item.dataset.name;
           dropdown.classList.remove("open");
           loadAdvancedStats();
@@ -676,12 +695,75 @@ async function loadAdvancedStats() {
     );
     const data = await r.json();
     if (data.error) throw new Error(data.error);
+    advMlbamId = data.mlbam_id;
     renderAdvancedStats(data);
+    loadSplits();
   } catch(e) {
     document.getElementById("adv-content").innerHTML =
       `<p style="color:#f87171">載入失敗：${e.message}</p>`;
   } finally {
     document.getElementById("adv-loading").style.display = "none";
+  }
+}
+
+async function loadSplits() {
+  if (!advMlbamId || !advPlayer) return;
+  const el = document.getElementById("splits-section");
+  if (!el) return;
+  el.querySelector(".splits-body").innerHTML =
+    `<div style="color:#64748b;font-size:.82rem;padding:6px 0">載入中...</div>`;
+  try {
+    const r = await fetch(
+      `/api/splits?mlbam_id=${advMlbamId}&player_type=${advPlayer.player_type}`
+    );
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    renderSplits(data, el.querySelector(".splits-body"));
+  } catch(e) {
+    el.querySelector(".splits-body").innerHTML =
+      `<p style="color:#f87171;font-size:.82rem">${e.message}</p>`;
+  }
+}
+
+function renderSplits(data, container) {
+  const keys = Object.keys(data);
+  if (!keys.length) { container.innerHTML = `<p style="color:#64748b;font-size:.82rem">無數據</p>`; return; }
+  const statKeys = Object.keys(data[keys[0]]);
+  let html = `<div class="tbl-wrap"><table>
+    <thead><tr><th style="text-align:left">Split</th>`;
+  statKeys.forEach(k => { html += `<th>${k}</th>`; });
+  html += `</tr></thead><tbody>`;
+  keys.forEach(name => {
+    html += `<tr><td style="text-align:left;font-weight:600;color:#f1f5f9;white-space:nowrap">${name}</td>`;
+    statKeys.forEach(k => { html += `<td>${data[name][k] ?? "—"}</td>`; });
+    html += `</tr>`;
+  });
+  html += `</tbody></table></div>`;
+  container.innerHTML = html;
+}
+
+async function loadDateRange() {
+  if (!advPlayer) { alert("請先選擇球員"); return; }
+  const start = document.getElementById("range-start").value;
+  const end   = document.getElementById("range-end").value;
+  if (!start || !end) { alert("請選擇起訖日期"); return; }
+  const el = document.getElementById("date-range-content");
+  el.innerHTML = `<div style="color:#64748b;font-size:.82rem">查詢中...</div>`;
+  try {
+    const r = await fetch(
+      `/api/date_range?name=${encodeURIComponent(advPlayer.name)}&position=${encodeURIComponent(advPlayer.position)}&start=${start}&end=${end}`
+    );
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    if (!Object.keys(data).length) { el.innerHTML = `<p style="color:#64748b;font-size:.85rem">此區間無數據</p>`; return; }
+    const entries = Object.entries(data).filter(([k]) => !["Name","Team"].includes(k));
+    const meta = [data.Name, data.Team].filter(Boolean).join(" · ");
+    el.innerHTML = `${meta ? `<p style="color:#94a3b8;font-size:.82rem;margin-bottom:8px">${meta}</p>` : ""}
+      <div class="fg-grid">
+        ${entries.map(([k,v]) => `<div class="fg-cell"><span class="fg-key">${k}</span><span class="fg-val">${v}</span></div>`).join("")}
+      </div>`;
+  } catch(e) {
+    el.innerHTML = `<p style="color:#f87171;font-size:.85rem">${e.message}</p>`;
   }
 }
 
@@ -731,6 +813,12 @@ function renderAdvancedStats(data) {
       </div>
     </div>`;
   }
+
+  // Splits 佔位（由 loadSplits() 非同步填入）
+  html += `<div class="section-card" id="splits-section">
+    <h3>Splits（Statcast 本季）</h3>
+    <div class="splits-body"></div>
+  </div>`;
 
   document.getElementById("adv-content").innerHTML = html;
 }
@@ -916,6 +1004,39 @@ def api_savant():
         "mlbam_id": mlbam_id,
         "savant": savant_data, "fangraphs": fg_data,
     })
+
+
+@app.route("/api/splits")
+def api_splits():
+    token = _store.get("token")
+    if not token:
+        return jsonify({"error": "未授權"}), 401
+    try:
+        mlbam_id    = int(request.args.get("mlbam_id", 0))
+        player_type = request.args.get("player_type", "batter").strip()
+        start_dt    = request.args.get("start", "").strip()
+        end_dt      = request.args.get("end",   "").strip()
+    except ValueError:
+        return jsonify({"error": "mlbam_id 格式錯誤"}), 400
+    if not mlbam_id:
+        return jsonify({"error": "缺少 mlbam_id"}), 400
+    return jsonify(fetch_splits_statcast(mlbam_id, player_type, start_dt, end_dt))
+
+
+@app.route("/api/date_range")
+def api_date_range():
+    token = _store.get("token")
+    if not token:
+        return jsonify({"error": "未授權"}), 401
+    name     = request.args.get("name",     "").strip()
+    position = request.args.get("position", "").strip()
+    start    = request.args.get("start",    "").strip()
+    end      = request.args.get("end",      "").strip()
+    if not name or not start or not end:
+        return jsonify({"error": "缺少 name / start / end"}), 400
+    pitcher_pos = {"SP", "RP", "P"}
+    player_type = "pitcher" if any(p in position.upper() for p in pitcher_pos) else "batter"
+    return jsonify(fetch_date_range_stats(name, player_type, start, end))
 
 
 @app.route("/api/my_roster")
