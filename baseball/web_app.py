@@ -16,6 +16,7 @@ from baseball_trade_analyzer import (
     get_mlb_leagues, get_stat_map,
     get_my_team_key, get_team_roster, get_standings,
     fetch_player_stats,
+    lookup_mlbam_id, fetch_savant_percentiles, fetch_fangraphs_stats,
     LEAGUES, CLIENT_ID, CLIENT_SECRET,
     AUTH_URL, TOKEN_URL, AVG_CATS,
 )
@@ -226,6 +227,33 @@ HTML = """<!DOCTYPE html>
   .load-btn { padding: 9px 20px; background: #1e293b; border: 1px solid #334155;
               border-radius: 8px; color: #e2e8f0; cursor: pointer; font-size: .9rem; }
   .load-btn:hover { border-color: #0ea5e9; color: #0ea5e9; }
+  /* ── 進階數據 ── */
+  .adv-player-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+                    background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+                    padding: 14px 18px; margin-bottom: 16px; }
+  .adv-player-name { font-size: 1.1rem; font-weight: 700; color: #f1f5f9; }
+  .adv-player-meta { font-size: .8rem; color: #64748b; margin-top: 2px; }
+  .adv-badge { padding: 3px 11px; border-radius: 20px; font-size: .78rem; font-weight: 600; }
+  .adv-badge.batter  { background: rgba(14,165,233,.15); color: #0ea5e9; }
+  .adv-badge.pitcher { background: rgba(99,102,241,.15);  color: #818cf8; }
+  .pct-section-title { font-size: .73rem; color: #64748b; text-transform: uppercase;
+                       letter-spacing: .07em; margin: 14px 0 4px; padding-bottom: 4px;
+                       border-bottom: 1px solid #1e293b; }
+  .pct-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; }
+  .pct-label { width: 148px; font-size: .82rem; color: #94a3b8;
+               text-align: right; flex-shrink: 0; }
+  .pct-track { flex: 1; position: relative; height: 6px;
+               background: #0f172a; border-radius: 3px; border: 1px solid #334155; }
+  .pct-dot { position: absolute; top: 50%; transform: translate(-50%, -50%);
+             width: 22px; height: 22px; border-radius: 50%;
+             display: flex; align-items: center; justify-content: center;
+             font-size: .63rem; font-weight: 700; color: #fff; }
+  .pct-val { width: 54px; font-size: .82rem; color: #e2e8f0; flex-shrink: 0; }
+  .fg-grid { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 0; }
+  .fg-cell { background: #0f172a; border-radius: 8px; padding: 8px 12px;
+             min-width: 68px; text-align: center; }
+  .fg-key  { display: block; font-size: .7rem; color: #64748b; margin-bottom: 3px; }
+  .fg-val  { display: block; font-size: .95rem; font-weight: 700; color: #f1f5f9; }
 </style>
 </head>
 <body>
@@ -235,6 +263,7 @@ HTML = """<!DOCTYPE html>
     <button class="nav-btn active" onclick="switchView('trade')">交易分析</button>
     <button class="nav-btn" onclick="switchView('roster')">我的名單</button>
     <button class="nav-btn" onclick="switchView('standings')">聯盟排名</button>
+    <button class="nav-btn" onclick="switchView('advanced')">進階數據</button>
   </nav>
 </header>
 <div id="league-bar">
@@ -295,6 +324,23 @@ HTML = """<!DOCTYPE html>
       <div class="spinner"></div><p style="margin-top:10px">抓取積分榜中...</p>
     </div>
     <div id="standings-content"></div>
+  </div>
+
+  <!-- ── 進階數據 ── -->
+  <div id="view-advanced" class="view">
+    <div style="margin-bottom:14px">
+      <div class="search-wrap" style="max-width:380px">
+        <input id="adv-search" type="text" placeholder="輸入球員名字搜尋..." autocomplete="off">
+        <div id="adv-dropdown" class="dropdown"></div>
+      </div>
+      <p style="color:#64748b;font-size:.82rem;margin-top:6px">
+        選擇球員後自動載入 Savant 百分位排名 + FanGraphs 本季數據
+      </p>
+    </div>
+    <div id="adv-loading" class="loading-box">
+      <div class="spinner"></div><p style="margin-top:10px">抓取進階數據中，請稍候...</p>
+    </div>
+    <div id="adv-content"></div>
   </div>
 </main>
 
@@ -581,6 +627,114 @@ function renderStandings(data) {
   document.getElementById("standings-content").innerHTML = html;
 }
 
+// ── 進階數據 ─────────────────────────────────────────────────────────────────
+let advPlayer = null;
+
+function setupAdvSearch() {
+  const input    = document.getElementById("adv-search");
+  const dropdown = document.getElementById("adv-dropdown");
+  input.addEventListener("input", () => {
+    clearTimeout(debounceTimer);
+    const q = input.value.trim();
+    if (q.length < 2) { dropdown.classList.remove("open"); return; }
+    debounceTimer = setTimeout(async () => {
+      const lk = getLeagueKey();
+      if (!lk) return;
+      const r = await fetch(`/api/search?name=${encodeURIComponent(q)}&league_key=${encodeURIComponent(lk)}`);
+      const results = await r.json();
+      if (!results.length) { dropdown.classList.remove("open"); return; }
+      dropdown.innerHTML = results.map(p =>
+        `<div class="dropdown-item" data-key="${p.key}" data-name="${p.name}" data-pos="${p.position}">
+           <span>${p.name}</span><span class="pos">${p.team} · ${p.position}</span>
+         </div>`
+      ).join("");
+      dropdown.querySelectorAll(".dropdown-item").forEach(item => {
+        item.addEventListener("click", () => {
+          advPlayer = { key: item.dataset.key, name: item.dataset.name, position: item.dataset.pos };
+          input.value = item.dataset.name;
+          dropdown.classList.remove("open");
+          loadAdvancedStats();
+        });
+      });
+      dropdown.classList.add("open");
+    }, 300);
+  });
+  input.addEventListener("keydown", e => { if (e.key === "Escape") dropdown.classList.remove("open"); });
+  document.addEventListener("click", e => {
+    if (!input.contains(e.target) && !dropdown.contains(e.target)) dropdown.classList.remove("open");
+  });
+}
+
+async function loadAdvancedStats() {
+  if (!advPlayer) return;
+  const lk = getLeagueKey();
+  document.getElementById("adv-loading").style.display = "block";
+  document.getElementById("adv-content").innerHTML = "";
+  try {
+    const r = await fetch(
+      `/api/savant?name=${encodeURIComponent(advPlayer.name)}&position=${encodeURIComponent(advPlayer.position)}&league_key=${encodeURIComponent(lk)}`
+    );
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    renderAdvancedStats(data);
+  } catch(e) {
+    document.getElementById("adv-content").innerHTML =
+      `<p style="color:#f87171">載入失敗：${e.message}</p>`;
+  } finally {
+    document.getElementById("adv-loading").style.display = "none";
+  }
+}
+
+function renderAdvancedStats(data) {
+  const isP = data.player_type === "pitcher";
+  let html = `<div class="adv-player-bar">
+    <div>
+      <div class="adv-player-name">${data.name}</div>
+      <div class="adv-player-meta">MLBAM ID: ${data.mlbam_id}</div>
+    </div>
+    <span class="adv-badge ${data.player_type}">${isP ? "投手" : "打者"}</span>
+  </div>`;
+
+  // Savant 百分位
+  const sv = data.savant;
+  if (sv && sv.sections && sv.sections.length) {
+    html += `<div class="section-card"><h3>Baseball Savant 百分位排名</h3>`;
+    sv.sections.forEach(sec => {
+      html += `<div class="pct-section-title">${sec.name}</div>`;
+      sec.stats.forEach(st => {
+        const p = st.percentile;
+        const color = p >= 70 ? "#ef4444" : p <= 30 ? "#3b82f6" : "#64748b";
+        const valStr = st.value != null ? st.value : "";
+        html += `<div class="pct-row">
+          <span class="pct-label">${st.label}</span>
+          <div class="pct-track">
+            <div class="pct-dot" style="left:${p}%;background:${color}">${p}</div>
+          </div>
+          <span class="pct-val">${valStr}</span>
+        </div>`;
+      });
+    });
+    html += `</div>`;
+  } else if (sv && sv.error) {
+    html += `<p style="color:#f87171;margin-bottom:12px">Savant 載入失敗：${sv.error}</p>`;
+  }
+
+  // FanGraphs
+  const fg = data.fangraphs;
+  if (fg && Object.keys(fg).length) {
+    const meta = [fg.Name, fg.Team].filter(Boolean).join(" · ");
+    const entries = Object.entries(fg).filter(([k]) => !["Name","Team"].includes(k));
+    html += `<div class="section-card">
+      <h3>FanGraphs 本季${meta ? ` <span style="font-weight:400;color:#94a3b8;text-transform:none;font-size:.85rem">${meta}</span>` : ""}</h3>
+      <div class="fg-grid">
+        ${entries.map(([k,v]) => `<div class="fg-cell"><span class="fg-key">${k}</span><span class="fg-val">${v}</span></div>`).join("")}
+      </div>
+    </div>`;
+  }
+
+  document.getElementById("adv-content").innerHTML = html;
+}
+
 // ── CSV 匯出 ──────────────────────────────────────────────────────────────────
 function downloadCSV(filename, rows) {
   const csv = rows.map(r =>
@@ -642,6 +796,7 @@ function clearError() { document.getElementById("error-box").style.display = "no
 loadLeagues();
 setupSearch("give-search", "give-dropdown", givePlayers, "give-chips");
 setupSearch("get-search",  "get-dropdown",  getPlayers,  "get-chips");
+setupAdvSearch();
 </script>
 </body>
 </html>"""
@@ -731,6 +886,36 @@ def api_analyze():
 
     result = run_analysis(token, league_key, league_cfg, stat_map, give_players, get_players)
     return jsonify(result)
+
+
+@app.route("/api/savant")
+def api_savant():
+    token = _store.get("token")
+    if not token:
+        return jsonify({"error": "未授權"}), 401
+    name     = request.args.get("name",     "").strip()
+    position = request.args.get("position", "").strip()
+    if not name:
+        return jsonify({"error": "缺少球員名稱"}), 400
+
+    pitcher_pos = {"SP", "RP", "P"}
+    player_type = "pitcher" if any(p in position.upper() for p in pitcher_pos) else "batter"
+
+    try:
+        mlbam_id = lookup_mlbam_id(name)
+    except ImportError as e:
+        return jsonify({"error": str(e)}), 500
+    if not mlbam_id:
+        return jsonify({"error": f"找不到「{name}」的 MLBAM ID，請確認英文拼寫"}), 404
+
+    savant_data = fetch_savant_percentiles(mlbam_id, player_type)
+    fg_data     = fetch_fangraphs_stats(name, player_type)
+
+    return jsonify({
+        "name": name, "player_type": player_type,
+        "mlbam_id": mlbam_id,
+        "savant": savant_data, "fangraphs": fg_data,
+    })
 
 
 @app.route("/api/my_roster")

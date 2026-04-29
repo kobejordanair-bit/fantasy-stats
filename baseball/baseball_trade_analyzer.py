@@ -813,6 +813,175 @@ def get_standings(token, league_key, stat_map):
         return []
 
 
+# ── Savant / FanGraphs 進階數據 ───────────────────────────────────────────────
+
+SAVANT_BATTER_FIELDS = [
+    ("batting_run_value",     "Batting Run Value",    "Value"),
+    ("baserunning_run_value", "Baserunning Run Value","Value"),
+    ("fielding_run_value",    "Fielding Run Value",   "Value"),
+    ("xwoba",                 "xwOBA",                "Batting"),
+    ("xba",                   "xBA",                  "Batting"),
+    ("xslg",                  "xSLG",                 "Batting"),
+    ("exit_velocity_avg",     "Avg Exit Velo",        "Batting"),
+    ("barrel_batted_rate",    "Barrel %",             "Batting"),
+    ("hard_hit_percent",      "Hard-Hit %",           "Batting"),
+    ("sweet_spot_percent",    "LA Sweet-Spot %",      "Batting"),
+    ("bat_speed",             "Bat Speed",            "Batting"),
+    ("squared_up_percent",    "Squared-Up %",         "Batting"),
+    ("oz_swing_percent",      "Chase %",              "Batting"),
+    ("whiff_percent",         "Whiff %",              "Batting"),
+    ("strikeout_percent",     "K %",                  "Batting"),
+    ("walk_percent",          "BB %",                 "Batting"),
+    ("outs_above_average",    "Range (OAA)",          "Fielding"),
+    ("arm_strength",          "Arm Strength",         "Fielding"),
+    ("sprint_speed",          "Sprint Speed",         "Running"),
+]
+
+SAVANT_PITCHER_FIELDS = [
+    ("pitching_run_value",    "Pitching Run Value",   "Value"),
+    ("fastball_run_value",    "Fastball Run Value",   "Value"),
+    ("breaking_run_value",    "Breaking Run Value",   "Value"),
+    ("offspeed_run_value",    "Offspeed Run Value",   "Value"),
+    ("xera",                  "xERA",                 "Pitching"),
+    ("xba",                   "xBA",                  "Pitching"),
+    ("fastball_avg_speed",    "Fastball Velo",        "Pitching"),
+    ("exit_velocity_avg",     "Avg Exit Velo",        "Pitching"),
+    ("oz_swing_percent",      "Chase %",              "Pitching"),
+    ("whiff_percent",         "Whiff %",              "Pitching"),
+    ("strikeout_percent",     "K %",                  "Pitching"),
+    ("walk_percent",          "BB %",                 "Pitching"),
+    ("barrel_batted_rate",    "Barrel %",             "Pitching"),
+    ("hard_hit_percent",      "Hard-Hit %",           "Pitching"),
+    ("groundballs_percent",   "GB %",                 "Pitching"),
+    ("extension",             "Extension",            "Pitching"),
+]
+
+
+def lookup_mlbam_id(player_name: str):
+    """用球員全名查找 MLBAM ID（需要 pybaseball）"""
+    try:
+        from pybaseball import playerid_lookup
+    except ImportError:
+        raise ImportError("請安裝 pybaseball：pip install pybaseball")
+    parts = player_name.strip().split()
+    last  = parts[-1] if parts else ""
+    first = " ".join(parts[:-1]) if len(parts) >= 2 else ""
+    try:
+        result = playerid_lookup(last, first, fuzzy=True)
+    except TypeError:
+        result = playerid_lookup(last, first)
+    if result is None or result.empty:
+        try:
+            result = playerid_lookup(last, fuzzy=True)
+        except TypeError:
+            result = playerid_lookup(last)
+    if result is None or result.empty:
+        return None
+    mlbam = result.iloc[0].get("key_mlbam")
+    if mlbam is None or str(mlbam) in ("nan", "None", ""):
+        return None
+    return int(float(mlbam))
+
+
+def _parse_savant_flat(raw, fields):
+    """把 Savant API 各種回傳格式統一解析成 sections list"""
+    flat: dict = {}
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            k = (item.get("stat_name") or item.get("name") or
+                 item.get("stat") or item.get("key") or "")
+            if k:
+                flat[str(k)] = item
+    elif isinstance(raw, dict):
+        flat = raw
+
+    sections: dict = {}
+    for api_key, display_name, section in fields:
+        entry = flat.get(api_key)
+        if entry is None:
+            continue
+        if isinstance(entry, dict):
+            pct = (entry.get("percentile") or entry.get("rank") or
+                   entry.get("percent_rank"))
+            val = (entry.get("value") or entry.get("stat_value") or
+                   entry.get("stat_value_display"))
+        else:
+            pct, val = entry, None
+        if pct is None:
+            continue
+        try:
+            pct = int(float(pct))
+        except Exception:
+            continue
+        sections.setdefault(section, []).append({
+            "key": api_key, "label": display_name,
+            "percentile": pct, "value": val,
+        })
+
+    order = ["Value", "Batting", "Fielding", "Running", "Pitching"]
+    return [{"name": s, "stats": sections[s]} for s in order if s in sections]
+
+
+def fetch_savant_percentiles(mlbam_id: int, player_type: str) -> dict:
+    """Baseball Savant 百分位排名。player_type: 'batter' | 'pitcher'"""
+    url = (f"https://baseballsavant.mlb.com/player-services/percentile-ranks"
+           f"?type={player_type}&playerId={mlbam_id}")
+    try:
+        resp = requests.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/124.0.0.0 Safari/537.36"
+        }, timeout=15)
+        if resp.status_code != 200:
+            return {"error": f"Savant HTTP {resp.status_code}"}
+        raw = resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+    fields = SAVANT_BATTER_FIELDS if player_type == "batter" else SAVANT_PITCHER_FIELDS
+    sections = _parse_savant_flat(raw, fields)
+    return {"mlbam_id": mlbam_id, "player_type": player_type, "sections": sections}
+
+
+def fetch_fangraphs_stats(player_name: str, player_type: str, season: int = 0) -> dict:
+    """FanGraphs 本季數據（pybaseball leaderboard 模糊比對）"""
+    import datetime
+    if not season:
+        season = datetime.date.today().year
+    try:
+        if player_type == "batter":
+            from pybaseball import batting_stats
+            df = batting_stats(season, qual=1)
+            want = ["Name", "Team", "G", "PA", "AVG", "OBP", "SLG",
+                    "wOBA", "wRC+", "BABIP", "K%", "BB%", "ISO", "WAR"]
+        else:
+            from pybaseball import pitching_stats
+            df = pitching_stats(season, qual=1)
+            want = ["Name", "Team", "G", "GS", "IP", "ERA", "FIP",
+                    "xFIP", "BABIP", "K%", "BB%", "K-BB%", "HR/9", "WAR"]
+        if df is None or df.empty:
+            return {}
+        parts = player_name.strip().split()
+        for token in [player_name] + parts:
+            mask = df["Name"].str.contains(token, case=False, na=False)
+            if mask.any():
+                row = df[mask].iloc[0]
+                cols = [c for c in want if c in row.index]
+                result = {}
+                for c in cols:
+                    v = row[c]
+                    try:
+                        result[c] = round(float(v), 3)
+                    except Exception:
+                        result[c] = str(v)
+                return result
+        return {}
+    except Exception:
+        return {}
+
+
 # ── 主程式 ────────────────────────────────────────────────────────────────────
 
 def main():
