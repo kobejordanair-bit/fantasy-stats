@@ -302,6 +302,18 @@ HTML = """<!DOCTYPE html>
   .sort-th { cursor: pointer; user-select: none; }
   .sort-th:hover { color: #e2e8f0; }
   .sort-th.sort-active { color: #0ea5e9; }
+  .adv-load-btn { display: block; width: 100%; margin-top: 14px; padding: 11px;
+                  background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+                  color: #e2e8f0; font-size: .9rem; font-weight: 600; cursor: pointer;
+                  transition: border-color .15s, color .15s; }
+  .adv-load-btn:hover { border-color: #0ea5e9; color: #0ea5e9; }
+  .adv-load-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .trade-adv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 4px; }
+  @media (max-width: 640px) { .trade-adv-grid { grid-template-columns: 1fr; } }
+  .trade-adv-side > h4 { font-size: .78rem; font-weight: 700; text-transform: uppercase;
+                         letter-spacing: .06em; margin-bottom: 10px; }
+  .trade-adv-side.give > h4 { color: #f87171; }
+  .trade-adv-side.get  > h4 { color: #4ade80; }
 </style>
 </head>
 <body>
@@ -485,22 +497,22 @@ async function doSearch(q, dropdown, players, chipsEl, input) {
   const results = await r.json();
   if (!results.length) { dropdown.classList.remove("open"); return; }
   dropdown.innerHTML = results.map(p =>
-    `<div class="dropdown-item" data-key="${p.key}" data-name="${p.name}">
+    `<div class="dropdown-item" data-key="${p.key}" data-name="${p.name}" data-pos="${p.position}">
        <span>${p.name}</span><span class="pos">${p.team} · ${p.position}</span>
      </div>`
   ).join("");
   dropdown.querySelectorAll(".dropdown-item").forEach(item => {
     item.addEventListener("click", () => {
-      addPlayer(item.dataset.key, item.dataset.name, players, chipsEl);
+      addPlayer(item.dataset.key, item.dataset.name, item.dataset.pos || "", players, chipsEl);
       input.value = ""; dropdown.classList.remove("open");
     });
   });
   dropdown.classList.add("open");
 }
 
-function addPlayer(key, name, players, chipsEl) {
+function addPlayer(key, name, pos, players, chipsEl) {
   if (players.find(p => p.key === key)) return;
-  players.push({ key, name });
+  players.push({ key, name, pos });
   renderChips(players, chipsEl);
 }
 function removePlayer(key, players, chipsEl) {
@@ -562,7 +574,75 @@ function renderTradeResults(data) {
     html += renderCatTable("投手", a.pitcher, gL, rL);
     html += `<div class="summary-row ${sc}">★ 綜合評估：${verdict}</div></div>`;
   });
+  html += `<button class="adv-load-btn" id="trade-adv-btn" onclick="loadTradeAdvanced()">📊 載入進階數據（Savant + FanGraphs）</button>
+<div id="trade-adv-content"></div>`;
   document.getElementById("trade-results").innerHTML = html;
+}
+
+async function loadTradeAdvanced() {
+  const btn = document.getElementById("trade-adv-btn");
+  const container = document.getElementById("trade-adv-content");
+  btn.disabled = true;
+  btn.textContent = "載入中，需要約 10-20 秒...";
+  try {
+    const allPlayers = [
+      ...givePlayers.map(p => ({ name: p.name, position: p.pos || "", side: "give" })),
+      ...getPlayers.map(p =>  ({ name: p.name, position: p.pos || "", side: "get"  })),
+    ];
+    const r = await fetch("/api/trade_advanced", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ players: allPlayers }),
+    });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    const giveCards = data.players.filter((_,i) => allPlayers[i].side === "give").map(renderTradeAdvCard).join("");
+    const getCards  = data.players.filter((_,i) => allPlayers[i].side === "get" ).map(renderTradeAdvCard).join("");
+    container.innerHTML = `<div class="trade-adv-grid">
+      <div class="trade-adv-side give"><h4>📤 送出</h4>${giveCards}</div>
+      <div class="trade-adv-side get"><h4>📥 收到</h4>${getCards}</div>
+    </div>`;
+    btn.style.display = "none";
+  } catch(e) {
+    container.innerHTML = `<p style="color:#f87171;margin-top:10px">載入失敗：${e.message}</p>`;
+    btn.disabled = false;
+    btn.textContent = "📊 載入進階數據（Savant + FanGraphs）";
+  }
+}
+
+function renderTradeAdvCard(data) {
+  const isP = data.player_type === "pitcher";
+  let html = `<div class="section-card">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <span style="font-weight:700;font-size:1rem;color:#f1f5f9">${data.name}</span>
+      <span class="adv-badge ${data.player_type}">${isP ? "投手" : "打者"}</span>
+    </div>`;
+  const sv = data.savant;
+  if (sv && sv.sections && sv.sections.length) {
+    html += `<div class="pct-section-title" style="margin-top:0">Baseball Savant 百分位</div>`;
+    sv.sections.forEach(sec => {
+      html += `<div class="pct-section-title">${sec.name}</div>`;
+      sec.stats.forEach(st => {
+        const p = st.percentile;
+        const color = p >= 70 ? "#ef4444" : p <= 30 ? "#3b82f6" : "#64748b";
+        html += `<div class="pct-row">
+          <span class="pct-label">${st.label}</span>
+          <div class="pct-track"><div class="pct-dot" style="left:${p}%;background:${color}">${p}</div></div>
+          <span class="pct-val">${st.value != null ? st.value : ""}</span>
+        </div>`;
+      });
+    });
+  } else {
+    const msg = (sv && sv.error) ? sv.error : "無 Savant 數據";
+    html += `<p style="color:#64748b;font-size:.85rem;margin-bottom:8px">${msg}</p>`;
+  }
+  const fg = data.fangraphs;
+  if (fg && Object.keys(fg).length) {
+    const entries = Object.entries(fg).filter(([k]) => !["Name","Team"].includes(k));
+    html += `<div class="pct-section-title">FanGraphs</div>
+      <div class="fg-grid">${entries.map(([k,v]) => `<div class="fg-cell"><span class="fg-key">${k}</span><span class="fg-val">${v}</span></div>`).join("")}</div>`;
+  }
+  html += `</div>`;
+  return html;
 }
 
 function renderCatTable(title, section, gL, rL) {
@@ -1101,6 +1181,37 @@ def api_analyze():
         return jsonify({"error": str(e)}), 401
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/trade_advanced", methods=["POST"])
+def api_trade_advanced():
+    body = request.get_json(force=True)
+    players = body.get("players", [])
+    if not players:
+        return jsonify({"error": "缺少球員"}), 400
+    pitcher_pos = {"SP", "RP", "P"}
+    results = [None] * len(players)
+
+    def fetch_one(i, p):
+        name = p.get("name", "").strip()
+        position = p.get("position", "").strip()
+        player_type = "pitcher" if any(pp in position.upper() for pp in pitcher_pos) else "batter"
+        try:
+            mlbam_id = lookup_mlbam_id(name)
+        except Exception:
+            mlbam_id = None
+        savant_data = fetch_savant_percentiles(mlbam_id, player_type) if mlbam_id else {"error": "找不到 MLBAM ID"}
+        fg_data = fetch_fangraphs_stats(name, player_type)
+        results[i] = {"name": name, "player_type": player_type,
+                      "mlbam_id": mlbam_id, "savant": savant_data, "fangraphs": fg_data}
+
+    threads = [threading.Thread(target=fetch_one, args=(i, p)) for i, p in enumerate(players)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=35)
+
+    return jsonify({"players": results})
 
 
 @app.route("/api/savant")
