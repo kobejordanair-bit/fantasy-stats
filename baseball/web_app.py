@@ -299,6 +299,9 @@ HTML = """<!DOCTYPE html>
   .date-input { background: #0f172a; border: 1px solid #334155; color: #e2e8f0;
                 padding: 7px 10px; border-radius: 7px; font-size: .88rem; outline: none; }
   .date-input:focus { border-color: #0ea5e9; }
+  .sort-th { cursor: pointer; user-select: none; }
+  .sort-th:hover { color: #e2e8f0; }
+  .sort-th.sort-active { color: #0ea5e9; }
 </style>
 </head>
 <body>
@@ -404,6 +407,9 @@ HTML = """<!DOCTYPE html>
 const givePlayers = [], getPlayers = [];
 let debounceTimer = null;
 let rosterData = null, standingsData = null;
+let activeRosterTab = 0;
+let rosterSort = { col: null, dir: 1, pi: 0 };
+let standingsSort = { col: null, dir: 1 };
 
 // ── 導航 ──────────────────────────────────────────────────────────────────────
 function switchView(name) {
@@ -419,6 +425,9 @@ function getLeagueKey() {
 
 function onLeagueChange() {
   rosterData = null; standingsData = null;
+  activeRosterTab = 0;
+  rosterSort = { col: null, dir: 1, pi: 0 };
+  standingsSort = { col: null, dir: 1 };
   document.getElementById("roster-content").innerHTML = "";
   document.getElementById("standings-content").innerHTML = "";
   document.getElementById("roster-csv-btn").style.display = "none";
@@ -606,18 +615,33 @@ function renderRoster(data) {
   document.getElementById("roster-csv-btn").style.display = "inline-block";
   const periods = ["本季", "近14天", "近30天"];
   const cats = data.cats;
+
+  let players = [...data.players];
+  if (rosterSort.col) {
+    const sortPeriod = periods[rosterSort.pi];
+    players.sort((a, b) => {
+      const av = (a.stats[sortPeriod] || {})[rosterSort.col] ?? -Infinity;
+      const bv = (b.stats[sortPeriod] || {})[rosterSort.col] ?? -Infinity;
+      return rosterSort.dir * (bv - av);
+    });
+  }
+
   let html = `<div class="period-tabs">` +
-    periods.map((p,i) => `<button class="tab-btn${i===0?' active':''}" onclick="switchRosterTab(${i})">${p}</button>`).join("") +
+    periods.map((p,i) => `<button class="tab-btn${i===activeRosterTab?' active':''}" onclick="switchRosterTab(${i})">${p}</button>`).join("") +
     `</div>`;
 
   periods.forEach((period, pi) => {
-    html += `<div class="roster-panel period-panel${pi===0?' active':''}" id="roster-panel-${pi}">
+    html += `<div class="roster-panel period-panel${pi===activeRosterTab?' active':''}" id="roster-panel-${pi}">
       <div class="section-card"><div class="tbl-wrap"><table>
       <thead><tr>
         <th>球員</th><th>守位</th><th>球隊</th>`;
-    cats.forEach(c => { html += `<th>${c}</th>`; });
+    cats.forEach(c => {
+      const active = rosterSort.col === c && rosterSort.pi === pi;
+      const ind = active ? (rosterSort.dir === 1 ? " ↓" : " ↑") : "";
+      html += `<th class="sort-th${active ? " sort-active" : ""}" onclick="sortRosterBy('${c}',${pi})">${c}${ind}</th>`;
+    });
     html += `</tr></thead><tbody>`;
-    data.players.forEach(p => {
+    players.forEach(p => {
       const stats = p.stats[period] || {};
       const statusHtml = p.status && p.status !== "A"
         ? ` <span class="status-dl">${p.status}</span>` : "";
@@ -636,8 +660,18 @@ function renderRoster(data) {
 }
 
 function switchRosterTab(idx) {
+  activeRosterTab = idx;
   document.querySelectorAll(".roster-panel").forEach((p,i) => p.classList.toggle("active", i===idx));
   document.querySelectorAll("#view-roster .tab-btn").forEach((b,i) => b.classList.toggle("active", i===idx));
+}
+
+function sortRosterBy(col, pi) {
+  if (rosterSort.col === col && rosterSort.pi === pi) {
+    rosterSort.dir *= -1;
+  } else {
+    rosterSort = { col, dir: 1, pi };
+  }
+  renderRoster(rosterData);
 }
 
 // ── 聯盟排名 ─────────────────────────────────────────────────────────────────
@@ -662,24 +696,47 @@ async function loadStandings() {
 function renderStandings(data) {
   standingsData = data;
   document.getElementById("standings-csv-btn").style.display = "inline-block";
-  const teams = data.teams, cats = data.cats, neg = data.negative_cats;
-  const n = teams.length;
+  const cats = data.cats, neg = data.negative_cats;
+  const n = data.teams.length;
 
-  // 各類別計算排名（1 = 最好）
+  // 各類別計算排名（1 = 最好，依原始數據，不受排序影響）
   const catRanks = {};
   cats.forEach(c => {
-    const sorted = [...teams].sort((a,b) =>
+    const sorted = [...data.teams].sort((a,b) =>
       neg.includes(c) ? (a.stats[c]||0)-(b.stats[c]||0) : (b.stats[c]||0)-(a.stats[c]||0));
     catRanks[c] = {};
     sorted.forEach((t,i) => { catRanks[c][t.team_key] = i+1; });
   });
 
+  let teams = [...data.teams];
+  if (standingsSort.col === "rank" || !standingsSort.col) {
+    teams.sort((a,b) => standingsSort.dir * ((a.rank||99)-(b.rank||99)));
+  } else if (standingsSort.col === "wlt") {
+    teams.sort((a,b) => standingsSort.dir * ((b.wins - b.losses) - (a.wins - a.losses)));
+  } else {
+    teams.sort((a,b) => {
+      const av = a.stats[standingsSort.col] ?? -Infinity;
+      const bv = b.stats[standingsSort.col] ?? -Infinity;
+      const better = neg.includes(standingsSort.col) ? av - bv : bv - av;
+      return standingsSort.dir * better;
+    });
+  }
+
+  const rankInd = standingsSort.col === "rank" ? (standingsSort.dir === 1 ? " ↓" : " ↑") : "";
+  const wltInd  = standingsSort.col === "wlt"  ? (standingsSort.dir === 1 ? " ↓" : " ↑") : "";
   let html = `<div class="section-card"><div class="tbl-wrap"><table>
-    <thead><tr><th>排名</th><th>球隊</th><th>W-L-T</th>`;
-  cats.forEach(c => { html += `<th>${c}</th>`; });
+    <thead><tr>
+      <th class="sort-th${standingsSort.col==="rank"?" sort-active":""}" onclick="sortStandingsBy('rank')">排名${rankInd}</th>
+      <th>球隊</th>
+      <th class="sort-th${standingsSort.col==="wlt"?" sort-active":""}" onclick="sortStandingsBy('wlt')">W-L-T${wltInd}</th>`;
+  cats.forEach(c => {
+    const active = standingsSort.col === c;
+    const ind = active ? (standingsSort.dir === 1 ? " ↓" : " ↑") : "";
+    html += `<th class="sort-th${active ? " sort-active" : ""}" onclick="sortStandingsBy('${c}')">${c}${ind}</th>`;
+  });
   html += `</tr></thead><tbody>`;
 
-  teams.sort((a,b) => (a.rank||99)-(b.rank||99)).forEach(t => {
+  teams.forEach(t => {
     const rankCls = (t.rank<=3)?"rank-top":(t.rank>=n-2)?"rank-bot":"";
     html += `<tr><td class="${rankCls}">${t.rank??""}</td>
       <td>${t.name}</td>
@@ -696,6 +753,15 @@ function renderStandings(data) {
   });
   html += `</tbody></table></div></div>`;
   document.getElementById("standings-content").innerHTML = html;
+}
+
+function sortStandingsBy(col) {
+  if (standingsSort.col === col) {
+    standingsSort.dir *= -1;
+  } else {
+    standingsSort = { col, dir: 1 };
+  }
+  renderStandings(standingsData);
 }
 
 // ── 進階數據 ─────────────────────────────────────────────────────────────────
