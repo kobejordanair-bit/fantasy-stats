@@ -4,7 +4,7 @@ Yahoo Fantasy Baseball 交易分析器 - Web 介面
 授權方式與籃球版相同：開啟 Yahoo 授權後把跳轉網址貼回頁面，不需要 HTTPS。
 """
 
-import os, sys, secrets, threading, webbrowser
+import os, sys, secrets, threading, webbrowser, time
 from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -14,8 +14,10 @@ import requests as http
 from baseball_trade_analyzer import (
     search_players_web, run_analysis,
     get_mlb_leagues, get_stat_map,
+    get_my_team_key, get_team_roster, get_standings,
+    fetch_player_stats,
     LEAGUES, CLIENT_ID, CLIENT_SECRET,
-    AUTH_URL, TOKEN_URL,
+    AUTH_URL, TOKEN_URL, AVG_CATS,
 )
 
 app = Flask(__name__)
@@ -123,26 +125,32 @@ HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>交易分析器</title>
+<title>⚾ Fantasy Baseball</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
          background: #0f172a; color: #e2e8f0; min-height: 100vh; }
-  header { background: #1e293b; padding: 18px 28px; border-bottom: 1px solid #334155;
+  header { background: #1e293b; padding: 14px 28px; border-bottom: 1px solid #334155;
            display: flex; align-items: center; gap: 12px; }
-  header h1 { font-size: 1.3rem; font-weight: 700; color: #f8fafc; }
-  header span { font-size: .8rem; background: #0ea5e9; color: #fff;
-                padding: 2px 8px; border-radius: 12px; }
-  #league-bar { background: #1e293b; padding: 10px 28px; border-bottom: 1px solid #334155;
+  header h1 { font-size: 1.3rem; font-weight: 700; color: #f8fafc; flex: 1; }
+  nav { display: flex; gap: 4px; }
+  .nav-btn { padding: 7px 16px; border-radius: 8px; border: 1px solid #334155;
+             background: transparent; color: #94a3b8; cursor: pointer; font-size: .88rem;
+             font-weight: 500; transition: all .15s; }
+  .nav-btn:hover { background: #1e293b; color: #e2e8f0; }
+  .nav-btn.active { background: #0ea5e9; border-color: #0ea5e9; color: #fff; }
+  #league-bar { background: #1e293b; padding: 9px 28px; border-bottom: 1px solid #334155;
                 display: flex; align-items: center; gap: 10px; font-size: .9rem; }
   #league-bar label { color: #94a3b8; }
   #league-select { background: #0f172a; border: 1px solid #334155; color: #e2e8f0;
                    padding: 5px 10px; border-radius: 6px; font-size: .9rem; }
-  main { max-width: 1000px; margin: 28px auto; padding: 0 20px; }
-  .trade-grid { display: grid; grid-template-columns: 1fr 48px 1fr; gap: 0; }
+  main { max-width: 1080px; margin: 28px auto; padding: 0 20px; }
+  .view { display: none; }
+  .view.active { display: block; }
+  /* ── 交易分析 ── */
+  .trade-grid { display: grid; grid-template-columns: 1fr 48px 1fr; }
   .side-card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 20px; }
-  .side-card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 14px;
-                  display: flex; align-items: center; gap: 6px; }
+  .side-card h2 { font-size: 1rem; font-weight: 600; margin-bottom: 14px; }
   .give h2 { color: #f87171; }
   .get  h2 { color: #4ade80; }
   .arrow-col { display: flex; align-items: center; justify-content: center;
@@ -172,36 +180,36 @@ HTML = """<!DOCTYPE html>
                  font-weight: 600; cursor: pointer; transition: opacity .2s; }
   .analyze-btn:hover { opacity: .88; }
   .analyze-btn:disabled { opacity: .4; cursor: not-allowed; }
-  #loading { text-align: center; color: #64748b; padding: 20px; display: none; }
+  .loading-box { text-align: center; color: #64748b; padding: 32px; display: none; }
   .spinner { display: inline-block; width: 22px; height: 22px; border: 3px solid #334155;
              border-top-color: #0ea5e9; border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  #results { margin-top: 8px; }
   .result-header { background: #1e293b; border: 1px solid #334155; border-radius: 10px;
                    padding: 16px 20px; margin-bottom: 16px; }
-  .result-header .labels { display: flex; gap: 16px; align-items: center;
-                            font-size: .95rem; flex-wrap: wrap; }
-  .result-header .give-lbl { color: #f87171; font-weight: 600; }
-  .result-header .get-lbl  { color: #4ade80; font-weight: 600; }
-  .result-header .arrow { color: #64748b; }
+  .result-header .labels { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .give-lbl { color: #f87171; font-weight: 600; }
+  .get-lbl  { color: #4ade80; font-weight: 600; }
   .period-tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
   .tab-btn { padding: 6px 14px; border-radius: 20px; border: 1px solid #334155;
              background: transparent; color: #94a3b8; cursor: pointer; font-size: .85rem; }
   .tab-btn.active { background: #0ea5e9; border-color: #0ea5e9; color: #fff; }
   .period-panel { display: none; }
   .period-panel.active { display: block; }
-  .stats-section { background: #1e293b; border: 1px solid #334155; border-radius: 10px;
-                   padding: 16px; margin-bottom: 12px; }
-  .stats-section h3 { font-size: .85rem; color: #64748b; margin-bottom: 12px;
-                       text-transform: uppercase; letter-spacing: .05em; }
-  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
-  th { color: #64748b; font-weight: 500; text-align: right; padding: 4px 8px; font-size: .8rem; }
-  th:first-child { text-align: left; }
-  td { padding: 6px 8px; text-align: right; border-top: 1px solid #1e293b; }
-  td:first-child { text-align: left; font-weight: 500; color: #cbd5e1; }
-  tr:hover td { background: #334155; }
-  .win  { color: #4ade80; font-weight: 600; }
-  .lose { color: #f87171; font-weight: 600; }
+  /* ── 通用表格 ── */
+  .section-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+                  padding: 16px; margin-bottom: 12px; }
+  .section-card h3 { font-size: .85rem; color: #64748b; margin-bottom: 12px;
+                     text-transform: uppercase; letter-spacing: .05em; }
+  .tbl-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: .87rem; white-space: nowrap; }
+  th { color: #64748b; font-weight: 500; text-align: right; padding: 5px 10px; font-size: .78rem; }
+  th:first-child, th:nth-child(2), th:nth-child(3) { text-align: left; }
+  td { padding: 6px 10px; text-align: right; border-top: 1px solid #0f172a; }
+  td:first-child { text-align: left; font-weight: 600; color: #f1f5f9; }
+  td:nth-child(2), td:nth-child(3) { text-align: left; color: #94a3b8; font-size: .82rem; }
+  tr:hover td { background: #263347; }
+  .win  { color: #4ade80; font-weight: 700; }
+  .lose { color: #f87171; font-weight: 700; }
   .tie  { color: #64748b; }
   .summary-row { margin-top: 10px; padding: 10px 14px; border-radius: 8px;
                  font-size: .9rem; font-weight: 600; text-align: center; }
@@ -211,51 +219,105 @@ HTML = """<!DOCTYPE html>
   #error-box { background: rgba(248,113,113,.1); border: 1px solid #f87171;
                border-radius: 8px; padding: 12px 16px; color: #f87171;
                margin-bottom: 16px; display: none; font-size: .9rem; }
+  /* ── 積分榜排名色 ── */
+  .rank-top { color: #4ade80; font-weight: 700; }
+  .rank-bot { color: #f87171; font-weight: 700; }
+  .status-dl { color: #f87171; font-size: .78rem; }
+  .load-btn { padding: 9px 20px; background: #1e293b; border: 1px solid #334155;
+              border-radius: 8px; color: #e2e8f0; cursor: pointer; font-size: .9rem; }
+  .load-btn:hover { border-color: #0ea5e9; color: #0ea5e9; }
 </style>
 </head>
 <body>
 <header>
-  <h1>⚾ 交易分析器</h1>
-  <span>Yahoo Fantasy Baseball</span>
+  <h1>⚾ Fantasy Baseball</h1>
+  <nav>
+    <button class="nav-btn active" onclick="switchView('trade')">交易分析</button>
+    <button class="nav-btn" onclick="switchView('roster')">我的名單</button>
+    <button class="nav-btn" onclick="switchView('standings')">聯盟排名</button>
+  </nav>
 </header>
 <div id="league-bar">
   <label for="league-select">聯盟</label>
-  <select id="league-select"><option value="">載入中...</option></select>
+  <select id="league-select" onchange="onLeagueChange()"><option value="">載入中...</option></select>
 </div>
 <main>
   <div id="error-box"></div>
-  <div class="trade-grid">
-    <div class="side-card give">
-      <h2>📤 你送出的球員</h2>
-      <div class="search-wrap">
-        <input id="give-search" type="text" placeholder="輸入球員名字搜尋..." autocomplete="off">
-        <div id="give-dropdown" class="dropdown"></div>
+
+  <!-- ── 交易分析 ── -->
+  <div id="view-trade" class="view active">
+    <div class="trade-grid">
+      <div class="side-card give">
+        <h2>📤 你送出的球員</h2>
+        <div class="search-wrap">
+          <input id="give-search" type="text" placeholder="輸入球員名字搜尋..." autocomplete="off">
+          <div id="give-dropdown" class="dropdown"></div>
+        </div>
+        <div id="give-chips" class="chips"></div>
       </div>
-      <div id="give-chips" class="chips"></div>
-    </div>
-    <div class="arrow-col">⇌</div>
-    <div class="side-card get">
-      <h2>📥 你收到的球員</h2>
-      <div class="search-wrap">
-        <input id="get-search" type="text" placeholder="輸入球員名字搜尋..." autocomplete="off">
-        <div id="get-dropdown" class="dropdown"></div>
+      <div class="arrow-col">⇌</div>
+      <div class="side-card get">
+        <h2>📥 你收到的球員</h2>
+        <div class="search-wrap">
+          <input id="get-search" type="text" placeholder="輸入球員名字搜尋..." autocomplete="off">
+          <div id="get-dropdown" class="dropdown"></div>
+        </div>
+        <div id="get-chips" class="chips"></div>
       </div>
-      <div id="get-chips" class="chips"></div>
     </div>
+    <button class="analyze-btn" id="analyze-btn">開始分析</button>
+    <div id="trade-loading" class="loading-box">
+      <div class="spinner"></div><p style="margin-top:10px">抓取球員數據中，請稍候...</p>
+    </div>
+    <div id="trade-results"></div>
   </div>
-  <button class="analyze-btn" id="analyze-btn">開始分析</button>
-  <div id="loading"><div class="spinner"></div><p style="margin-top:10px">抓取球員數據中，請稍候...</p></div>
-  <div id="results"></div>
+
+  <!-- ── 我的名單 ── -->
+  <div id="view-roster" class="view">
+    <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center">
+      <button class="load-btn" onclick="loadRoster()">載入 / 重新整理</button>
+      <span style="color:#64748b;font-size:.85rem">首次載入約需 30–60 秒</span>
+    </div>
+    <div id="roster-loading" class="loading-box">
+      <div class="spinner"></div><p style="margin-top:10px">抓取名單與數據中...</p>
+    </div>
+    <div id="roster-content"></div>
+  </div>
+
+  <!-- ── 聯盟排名 ── -->
+  <div id="view-standings" class="view">
+    <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center">
+      <button class="load-btn" onclick="loadStandings()">載入 / 重新整理</button>
+    </div>
+    <div id="standings-loading" class="loading-box">
+      <div class="spinner"></div><p style="margin-top:10px">抓取積分榜中...</p>
+    </div>
+    <div id="standings-content"></div>
+  </div>
 </main>
 
 <script>
 const givePlayers = [], getPlayers = [];
 let debounceTimer = null;
 
+// ── 導航 ──────────────────────────────────────────────────────────────────────
+function switchView(name) {
+  document.querySelectorAll(".view").forEach(el => el.classList.remove("active"));
+  document.querySelectorAll(".nav-btn").forEach(b => b.classList.remove("active"));
+  document.getElementById("view-" + name).classList.add("active");
+  event.currentTarget.classList.add("active");
+}
+
 function getLeagueKey() {
   return document.getElementById("league-select").value;
 }
 
+function onLeagueChange() {
+  document.getElementById("roster-content").innerHTML = "";
+  document.getElementById("standings-content").innerHTML = "";
+}
+
+// ── 聯盟載入 ─────────────────────────────────────────────────────────────────
 async function loadLeagues() {
   const r = await fetch("/api/leagues");
   if (!r.ok) { window.location = "/auth"; return; }
@@ -266,46 +328,39 @@ async function loadLeagues() {
   ).join("");
 }
 
-function setupSearch(inputId, dropdownId, players, chips) {
-  const input = document.getElementById(inputId);
+// ── 球員搜尋 ─────────────────────────────────────────────────────────────────
+function setupSearch(inputId, dropdownId, players, chipsId) {
+  const input    = document.getElementById(inputId);
   const dropdown = document.getElementById(dropdownId);
+  const chipsEl  = document.getElementById(chipsId);
 
   input.addEventListener("input", () => {
     clearTimeout(debounceTimer);
     const q = input.value.trim();
     if (q.length < 2) { dropdown.classList.remove("open"); return; }
-    debounceTimer = setTimeout(() => doSearch(q, dropdown, players, chips, input), 300);
+    debounceTimer = setTimeout(() => doSearch(q, dropdown, players, chipsEl, input), 300);
   });
-
-  input.addEventListener("keydown", e => {
-    if (e.key === "Escape") dropdown.classList.remove("open");
-  });
-
+  input.addEventListener("keydown", e => { if (e.key === "Escape") dropdown.classList.remove("open"); });
   document.addEventListener("click", e => {
-    if (!input.contains(e.target) && !dropdown.contains(e.target))
-      dropdown.classList.remove("open");
+    if (!input.contains(e.target) && !dropdown.contains(e.target)) dropdown.classList.remove("open");
   });
 }
 
 async function doSearch(q, dropdown, players, chipsEl, input) {
-  const leagueKey = getLeagueKey();
-  if (!leagueKey) return;
-  const r = await fetch(`/api/search?name=${encodeURIComponent(q)}&league_key=${encodeURIComponent(leagueKey)}`);
+  const lk = getLeagueKey();
+  if (!lk) return;
+  const r = await fetch(`/api/search?name=${encodeURIComponent(q)}&league_key=${encodeURIComponent(lk)}`);
   const results = await r.json();
   if (!results.length) { dropdown.classList.remove("open"); return; }
-
   dropdown.innerHTML = results.map(p =>
-    `<div class="dropdown-item" data-key="${p.key}" data-name="${p.name}" data-pos="${p.position}" data-team="${p.team}">
-      <span>${p.name}</span>
-      <span class="pos">${p.team} · ${p.position}</span>
-    </div>`
+    `<div class="dropdown-item" data-key="${p.key}" data-name="${p.name}">
+       <span>${p.name}</span><span class="pos">${p.team} · ${p.position}</span>
+     </div>`
   ).join("");
-
   dropdown.querySelectorAll(".dropdown-item").forEach(item => {
     item.addEventListener("click", () => {
       addPlayer(item.dataset.key, item.dataset.name, players, chipsEl);
-      input.value = "";
-      dropdown.classList.remove("open");
+      input.value = ""; dropdown.classList.remove("open");
     });
   });
   dropdown.classList.add("open");
@@ -316,136 +371,216 @@ function addPlayer(key, name, players, chipsEl) {
   players.push({ key, name });
   renderChips(players, chipsEl);
 }
-
 function removePlayer(key, players, chipsEl) {
   const idx = players.findIndex(p => p.key === key);
   if (idx !== -1) players.splice(idx, 1);
   renderChips(players, chipsEl);
 }
-
 function renderChips(players, chipsEl) {
   chipsEl.innerHTML = players.map(p =>
-    `<div class="chip">
-      <span>${p.name}</span>
-      <button onclick="removePlayer('${p.key}', ${chipsEl.id === 'give-chips' ? 'givePlayers' : 'getPlayers'}, document.getElementById('${chipsEl.id}'))" title="移除">✕</button>
-    </div>`
+    `<div class="chip"><span>${p.name}</span>
+     <button onclick="removePlayer('${p.key}',${chipsEl.id==='give-chips'?'givePlayers':'getPlayers'},document.getElementById('${chipsEl.id}'))" title="移除">✕</button>
+     </div>`
   ).join("");
 }
 
+// ── 交易分析 ─────────────────────────────────────────────────────────────────
 document.getElementById("analyze-btn").addEventListener("click", async () => {
-  const leagueKey = getLeagueKey();
-  if (!leagueKey)          return showError("請先選擇聯盟");
+  const lk = getLeagueKey();
+  if (!lk)               return showError("請先選擇聯盟");
   if (!givePlayers.length) return showError("請加入至少一位「送出」球員");
   if (!getPlayers.length)  return showError("請加入至少一位「收到」球員");
   clearError();
-
   document.getElementById("analyze-btn").disabled = true;
-  document.getElementById("loading").style.display = "block";
-  document.getElementById("results").innerHTML = "";
-
+  document.getElementById("trade-loading").style.display = "block";
+  document.getElementById("trade-results").innerHTML = "";
   try {
     const r = await fetch("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ league_key: leagueKey, give: givePlayers, get: getPlayers }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ league_key: lk, give: givePlayers, get: getPlayers }),
     });
     const data = await r.json();
     if (data.error) throw new Error(data.error);
-    renderResults(data);
-  } catch (e) {
-    showError("分析失敗：" + e.message);
-  } finally {
+    renderTradeResults(data);
+  } catch (e) { showError("分析失敗：" + e.message); }
+  finally {
     document.getElementById("analyze-btn").disabled = false;
-    document.getElementById("loading").style.display = "none";
+    document.getElementById("trade-loading").style.display = "none";
   }
 });
 
-function renderResults(data) {
+function renderTradeResults(data) {
   const periods = ["本季", "近14天", "近30天"];
-  const giveLabel = data.give, getLabel = data.get;
-
-  let html = `<div class="result-header">
-    <div class="labels">
-      <span class="give-lbl">📤 ${giveLabel}</span>
-      <span class="arrow">⇌</span>
-      <span class="get-lbl">📥 ${getLabel}</span>
-    </div>
-  </div>`;
-
+  const gL = data.give, rL = data.get;
+  let html = `<div class="result-header"><div class="labels">
+    <span class="give-lbl">📤 ${gL}</span><span style="color:#64748b">⇌</span>
+    <span class="get-lbl">📥 ${rL}</span></div></div>`;
   html += `<div class="period-tabs">` +
-    periods.map((p, i) =>
-      `<button class="tab-btn${i === 0 ? ' active' : ''}" onclick="switchTab(${i})">${p}</button>`
-    ).join("") + `</div>`;
-
+    periods.map((p,i) => `<button class="tab-btn${i===0?' active':''}" onclick="switchPeriodTab(${i},'trade')">${p}</button>`).join("") +
+    `</div>`;
   periods.forEach((period, i) => {
     const a = data.analysis[period];
     const ow = a.overall_win, ol = a.overall_lose, ot = a.overall_tie;
-    const verdict = ow > ol ? `收到方佔優（${ow}勝 ${ol}負 ${ot}平）`
-                 : ol > ow ? `送出方佔優（${ol}勝 ${ow}負 ${ot}平）`
+    const verdict = ow>ol ? `收到方佔優（${ow}勝 ${ol}負 ${ot}平）`
+                 : ol>ow ? `送出方佔優（${ol}勝 ${ow}負 ${ot}平）`
                  : `勢均力敵（${ow}勝 ${ol}負 ${ot}平）`;
-    const summaryClass = ow > ol ? "summary-win" : ol > ow ? "summary-lose" : "summary-tie";
+    const sc = ow>ol?"summary-win":ol>ow?"summary-lose":"summary-tie";
+    html += `<div class="period-panel trade-panel${i===0?' active':''}" id="trade-panel-${i}">`;
+    html += renderCatTable("打者", a.batter, gL, rL);
+    html += renderCatTable("投手", a.pitcher, gL, rL);
+    html += `<div class="summary-row ${sc}">★ 綜合評估：${verdict}</div></div>`;
+  });
+  document.getElementById("trade-results").innerHTML = html;
+}
 
-    html += `<div class="period-panel${i === 0 ? ' active' : ''}" id="panel-${i}">`;
-    html += renderTable("打者", a.batter, giveLabel, getLabel);
-    html += renderTable("投手", a.pitcher, giveLabel, getLabel);
-    html += `<div class="summary-row ${summaryClass}">★ 綜合評估：${verdict}</div>`;
-    html += `</div>`;
+function renderCatTable(title, section, gL, rL) {
+  const rows = section.detail.map(r => {
+    const gv = r[gL], rv = r[rL];
+    const fG = r.is_avg ? gv.toFixed(3) : Math.round(gv);
+    const fR = r.is_avg ? rv.toFixed(3) : Math.round(rv);
+    const isWin = r.outcome==="get", isLose = r.outcome==="give";
+    const cls = isWin?"win":isLose?"lose":"tie";
+    return `<tr><td>${r.cat}</td>
+      <td class="${isLose?'lose':''}">${fG}</td>
+      <td class="${isWin?'win':''}">${fR}</td>
+      <td class="${cls}">${isWin?"✅":isLose?"❌":"—"}</td></tr>`;
+  }).join("");
+  return `<div class="section-card">
+    <h3>${title} <span style="color:#94a3b8;font-size:.75rem;text-transform:none;margin-left:6px">${section.win}優 ${section.lose}劣 ${section.tie}平</span></h3>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>類別</th><th>送出</th><th>收到</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div></div>`;
+}
+
+function switchPeriodTab(idx, prefix) {
+  document.querySelectorAll(`.${prefix}-panel`).forEach((p,i) => p.classList.toggle("active", i===idx));
+  const tabs = document.querySelectorAll(".period-tabs .tab-btn");
+  tabs.forEach((b,i) => b.classList.toggle("active", i===idx));
+}
+
+// ── 我的名單 ─────────────────────────────────────────────────────────────────
+async function loadRoster() {
+  const lk = getLeagueKey();
+  if (!lk) return;
+  document.getElementById("roster-loading").style.display = "block";
+  document.getElementById("roster-content").innerHTML = "";
+  try {
+    const r = await fetch(`/api/my_roster?league_key=${encodeURIComponent(lk)}`);
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    renderRoster(data);
+  } catch(e) {
+    document.getElementById("roster-content").innerHTML =
+      `<p style="color:#f87171">載入失敗：${e.message}</p>`;
+  } finally {
+    document.getElementById("roster-loading").style.display = "none";
+  }
+}
+
+function renderRoster(data) {
+  const periods = ["本季", "近14天", "近30天"];
+  const cats = data.cats;
+  let html = `<div class="period-tabs">` +
+    periods.map((p,i) => `<button class="tab-btn${i===0?' active':''}" onclick="switchRosterTab(${i})">${p}</button>`).join("") +
+    `</div>`;
+
+  periods.forEach((period, pi) => {
+    html += `<div class="roster-panel period-panel${pi===0?' active':''}" id="roster-panel-${pi}">
+      <div class="section-card"><div class="tbl-wrap"><table>
+      <thead><tr>
+        <th>球員</th><th>守位</th><th>球隊</th>`;
+    cats.forEach(c => { html += `<th>${c}</th>`; });
+    html += `</tr></thead><tbody>`;
+    data.players.forEach(p => {
+      const stats = p.stats[period] || {};
+      const statusHtml = p.status && p.status !== "A"
+        ? ` <span class="status-dl">${p.status}</span>` : "";
+      html += `<tr><td>${p.name}${statusHtml}</td>
+        <td>${p.position}</td><td>${p.team}</td>`;
+      cats.forEach(c => {
+        const v = stats[c];
+        const isAvg = data.avg_cats.includes(c);
+        html += `<td>${v == null ? "—" : isAvg ? Number(v).toFixed(3) : Math.round(v)}</td>`;
+      });
+      html += `</tr>`;
+    });
+    html += `</tbody></table></div></div></div>`;
+  });
+  document.getElementById("roster-content").innerHTML = html;
+}
+
+function switchRosterTab(idx) {
+  document.querySelectorAll(".roster-panel").forEach((p,i) => p.classList.toggle("active", i===idx));
+  document.querySelectorAll("#view-roster .tab-btn").forEach((b,i) => b.classList.toggle("active", i===idx));
+}
+
+// ── 聯盟排名 ─────────────────────────────────────────────────────────────────
+async function loadStandings() {
+  const lk = getLeagueKey();
+  if (!lk) return;
+  document.getElementById("standings-loading").style.display = "block";
+  document.getElementById("standings-content").innerHTML = "";
+  try {
+    const r = await fetch(`/api/standings?league_key=${encodeURIComponent(lk)}`);
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    renderStandings(data);
+  } catch(e) {
+    document.getElementById("standings-content").innerHTML =
+      `<p style="color:#f87171">載入失敗：${e.message}</p>`;
+  } finally {
+    document.getElementById("standings-loading").style.display = "none";
+  }
+}
+
+function renderStandings(data) {
+  const teams = data.teams, cats = data.cats, neg = data.negative_cats;
+  const n = teams.length;
+
+  // 各類別計算排名（1 = 最好）
+  const catRanks = {};
+  cats.forEach(c => {
+    const sorted = [...teams].sort((a,b) =>
+      neg.includes(c) ? (a.stats[c]||0)-(b.stats[c]||0) : (b.stats[c]||0)-(a.stats[c]||0));
+    catRanks[c] = {};
+    sorted.forEach((t,i) => { catRanks[c][t.team_key] = i+1; });
   });
 
-  document.getElementById("results").innerHTML = html;
+  let html = `<div class="section-card"><div class="tbl-wrap"><table>
+    <thead><tr><th>排名</th><th>球隊</th><th>W-L-T</th>`;
+  cats.forEach(c => { html += `<th>${c}</th>`; });
+  html += `</tr></thead><tbody>`;
+
+  teams.sort((a,b) => (a.rank||99)-(b.rank||99)).forEach(t => {
+    const rankCls = (t.rank<=3)?"rank-top":(t.rank>=n-2)?"rank-bot":"";
+    html += `<tr><td class="${rankCls}">${t.rank??""}</td>
+      <td>${t.name}</td>
+      <td style="color:#94a3b8">${t.wins}-${t.losses}-${t.ties}</td>`;
+    cats.forEach(c => {
+      const v = t.stats[c];
+      const r = catRanks[c][t.team_key];
+      const cls = r<=3?"rank-top":r>=n-2?"rank-bot":"";
+      const isAvg = data.avg_cats.includes(c);
+      const disp = v==null?"—": isAvg ? Number(v).toFixed(3) : Math.round(v);
+      html += `<td class="${cls}" title="排名 ${r}">${disp}</td>`;
+    });
+    html += `</tr>`;
+  });
+  html += `</tbody></table></div></div>`;
+  document.getElementById("standings-content").innerHTML = html;
 }
 
-function renderTable(title, section, giveLabel, getLabel) {
-  const rows = section.detail.map(r => {
-    const gv = r[giveLabel], rv = r[getLabel];
-    const fmtG = r.is_avg ? gv.toFixed(3) : Math.round(gv);
-    const fmtR = r.is_avg ? rv.toFixed(3) : Math.round(rv);
-    const isWin  = r.outcome === "get";
-    const isLose = r.outcome === "give";
-    const cls = isWin ? "win" : isLose ? "lose" : "tie";
-    const icon = isWin ? "✅" : isLose ? "❌" : "—";
-    return `<tr>
-      <td>${r.cat}</td>
-      <td class="${isLose ? 'lose' : ''}">${fmtG}</td>
-      <td class="${isWin  ? 'win'  : ''}">${fmtR}</td>
-      <td class="${cls}">${icon}</td>
-    </tr>`;
-  }).join("");
-
-  const w = section.win, l = section.lose, t = section.tie;
-  return `<div class="stats-section">
-    <h3>${title} <span style="color:#94a3b8;font-size:.75rem;text-transform:none;margin-left:6px">${w}優 ${l}劣 ${t}平</span></h3>
-    <table>
-      <thead><tr>
-        <th>類別</th>
-        <th>送出</th>
-        <th>收到</th>
-        <th></th>
-      </tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-  </div>`;
-}
-
-function switchTab(idx) {
-  document.querySelectorAll(".tab-btn").forEach((b, i) =>
-    b.classList.toggle("active", i === idx));
-  document.querySelectorAll(".period-panel").forEach((p, i) =>
-    p.classList.toggle("active", i === idx));
-}
-
+// ── 工具 ─────────────────────────────────────────────────────────────────────
 function showError(msg) {
   const el = document.getElementById("error-box");
-  el.textContent = msg;
-  el.style.display = "block";
+  el.textContent = msg; el.style.display = "block";
 }
-function clearError() {
-  document.getElementById("error-box").style.display = "none";
-}
+function clearError() { document.getElementById("error-box").style.display = "none"; }
 
 loadLeagues();
-setupSearch("give-search", "give-dropdown", givePlayers, document.getElementById("give-chips"));
-setupSearch("get-search",  "get-dropdown",  getPlayers,  document.getElementById("get-chips"));
+setupSearch("give-search", "give-dropdown", givePlayers, "give-chips");
+setupSearch("get-search",  "get-dropdown",  getPlayers,  "get-chips");
 </script>
 </body>
 </html>"""
@@ -535,6 +670,118 @@ def api_analyze():
 
     result = run_analysis(token, league_key, league_cfg, stat_map, give_players, get_players)
     return jsonify(result)
+
+
+@app.route("/api/my_roster")
+def api_my_roster():
+    token = _store.get("token")
+    if not token:
+        return jsonify({"error": "未授權"}), 401
+    league_key = request.args.get("league_key", "").strip()
+    if not league_key:
+        return jsonify({"error": "缺少 league_key"}), 400
+
+    my_teams = get_my_team_key(token)
+    team_key = my_teams.get(league_key)
+    if not team_key:
+        return jsonify({"error": "找不到此聯盟中的球隊"}), 404
+
+    stat_maps = _store.setdefault("stat_maps", {})
+    if league_key not in stat_maps:
+        stat_maps[league_key] = get_stat_map(token, league_key)
+    stat_map = stat_maps[league_key]
+
+    leagues = _store.get("leagues", [])
+    league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
+    league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
+    all_cats = league_cfg["batter_cats"] + league_cfg["pitcher_cats"]
+
+    roster = get_team_roster(token, team_key)
+    stat_types = {"本季": "season", "近14天": "last_week", "近30天": "last_month"}
+
+    players_out = []
+    for player in roster:
+        player_stats = {}
+        for period, stype in stat_types.items():
+            player_stats[period] = fetch_player_stats(
+                token, league_key, player["key"], stype, stat_map)
+            time.sleep(0.2)
+        players_out.append({
+            "name": player["name"], "position": player["position"],
+            "team": player["team"], "status": player["status"],
+            "stats": player_stats,
+        })
+
+    avg_cats = [c for c in all_cats if c in AVG_CATS]
+    return jsonify({"players": players_out, "cats": all_cats, "avg_cats": avg_cats})
+
+
+@app.route("/api/standings")
+def api_standings():
+    token = _store.get("token")
+    if not token:
+        return jsonify({"error": "未授權"}), 401
+    league_key = request.args.get("league_key", "").strip()
+    if not league_key:
+        return jsonify({"error": "缺少 league_key"}), 400
+
+    stat_maps = _store.setdefault("stat_maps", {})
+    if league_key not in stat_maps:
+        stat_maps[league_key] = get_stat_map(token, league_key)
+    stat_map = stat_maps[league_key]
+
+    leagues = _store.get("leagues", [])
+    league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
+    league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
+    all_cats = league_cfg["batter_cats"] + league_cfg["pitcher_cats"]
+    negative_cats = list(league_cfg["negative"])
+    avg_cats = [c for c in all_cats if c in AVG_CATS]
+
+    teams = get_standings(token, league_key, stat_map)
+    return jsonify({
+        "teams": teams, "cats": all_cats,
+        "negative_cats": negative_cats, "avg_cats": avg_cats,
+    })
+
+
+@app.route("/api/team_roster")
+def api_team_roster():
+    token = _store.get("token")
+    if not token:
+        return jsonify({"error": "未授權"}), 401
+    league_key = request.args.get("league_key", "").strip()
+    team_key   = request.args.get("team_key",   "").strip()
+    if not league_key or not team_key:
+        return jsonify({"error": "缺少 league_key 或 team_key"}), 400
+
+    stat_maps = _store.setdefault("stat_maps", {})
+    if league_key not in stat_maps:
+        stat_maps[league_key] = get_stat_map(token, league_key)
+    stat_map = stat_maps[league_key]
+
+    leagues = _store.get("leagues", [])
+    league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
+    league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
+    all_cats = league_cfg["batter_cats"] + league_cfg["pitcher_cats"]
+
+    roster = get_team_roster(token, team_key)
+    stat_types = {"本季": "season", "近14天": "last_week", "近30天": "last_month"}
+
+    players_out = []
+    for player in roster:
+        player_stats = {}
+        for period, stype in stat_types.items():
+            player_stats[period] = fetch_player_stats(
+                token, league_key, player["key"], stype, stat_map)
+            time.sleep(0.2)
+        players_out.append({
+            "name": player["name"], "position": player["position"],
+            "team": player["team"], "status": player["status"],
+            "stats": player_stats,
+        })
+
+    avg_cats = [c for c in all_cats if c in AVG_CATS]
+    return jsonify({"players": players_out, "cats": all_cats, "avg_cats": avg_cats})
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

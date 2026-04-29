@@ -675,6 +675,144 @@ def analyze_trade(token, league_key, league_cfg, stat_map):
     print(f"\n✅ 詳細結果已存至 trade_analysis_result.json")
 
 
+# ── 聯盟資訊 / 名單 / 積分榜 ─────────────────────────────────────────────────
+
+def get_my_team_key(token):
+    """回傳 {league_key: team_key}，對應使用者在各 MLB 聯盟的球隊"""
+    try:
+        data = api_get(token, "/users;use_login=1/games;game_codes=mlb/teams")
+        games = data["fantasy_content"]["users"]["0"]["user"][1]["games"]
+        result = {}
+        for i in range(games["count"]):
+            game = games[str(i)]["game"]
+            teams_block = game[1].get("teams", {})
+            for j in range(teams_block.get("count", 0)):
+                t_data = teams_block[str(j)]["team"][0]
+                team_key = None
+                for attr in t_data:
+                    if isinstance(attr, dict) and "team_key" in attr:
+                        team_key = attr["team_key"]
+                        break
+                if team_key:
+                    parts = team_key.split(".")
+                    if len(parts) >= 3:
+                        lg_key = ".".join(parts[:3])
+                        result[lg_key] = team_key
+        return result
+    except Exception:
+        return {}
+
+
+def get_team_roster(token, team_key):
+    """取得球隊完整名單 [{"key","name","position","team","status"}]"""
+    try:
+        data = api_get(token, f"/team/{team_key}/roster")
+
+        def find_players(obj):
+            if isinstance(obj, dict):
+                if "players" in obj and isinstance(obj["players"], dict) and "count" in obj["players"]:
+                    return obj["players"]
+                for v in obj.values():
+                    r = find_players(v)
+                    if r: return r
+            elif isinstance(obj, list):
+                for item in obj:
+                    r = find_players(item)
+                    if r: return r
+            return None
+
+        players_block = find_players(data)
+        if not players_block:
+            return []
+
+        players = []
+        for i in range(players_block.get("count", 0)):
+            p = players_block[str(i)]["player"][0]
+            pkey = pname = pos = pteam = status = None
+            for attr in p:
+                if isinstance(attr, dict):
+                    if "player_key" in attr: pkey = attr["player_key"]
+                    if "name" in attr and isinstance(attr["name"], dict):
+                        pname = attr["name"].get("full")
+                    if "display_position" in attr: pos = attr["display_position"]
+                    if "editorial_team_abbr" in attr: pteam = attr["editorial_team_abbr"]
+                    if "status" in attr: status = attr["status"]
+            if pkey and pname:
+                players.append({
+                    "key": pkey, "name": pname,
+                    "position": pos or "", "team": pteam or "",
+                    "status": status or "A",
+                })
+        return players
+    except Exception:
+        return []
+
+
+def get_standings(token, league_key, stat_map):
+    """取得積分榜，回傳各隊數據與各類別數值（供前端計算排名）"""
+    try:
+        data = api_get(token, f"/league/{league_key}/standings")
+
+        def find_teams(obj):
+            if isinstance(obj, dict):
+                if "teams" in obj and isinstance(obj["teams"], dict) and "count" in obj["teams"]:
+                    return obj["teams"]
+                for v in obj.values():
+                    r = find_teams(v)
+                    if r: return r
+            elif isinstance(obj, list):
+                for item in obj:
+                    r = find_teams(item)
+                    if r: return r
+            return None
+
+        teams_block = find_teams(data)
+        if not teams_block:
+            return []
+
+        teams = []
+        for i in range(teams_block.get("count", 0)):
+            td = teams_block[str(i)]["team"]
+            info = td[0]
+            team_key = team_name = rank = None
+            wins = losses = ties = 0
+            for attr in info:
+                if isinstance(attr, dict):
+                    if "team_key" in attr: team_key = attr["team_key"]
+                    if "name" in attr: team_name = attr["name"]
+                    if "team_standings" in attr:
+                        ts = attr["team_standings"]
+                        rank = ts.get("rank")
+                        oc = ts.get("outcome_totals", {})
+                        wins   = to_float(oc.get("wins",   0))
+                        losses = to_float(oc.get("losses", 0))
+                        ties   = to_float(oc.get("ties",   0))
+
+            cat_stats = {}
+            if len(td) > 1 and isinstance(td[1], dict):
+                raw = td[1].get("team_stats", {}).get("stats", [])
+                if isinstance(raw, dict):
+                    raw = [v for k, v in raw.items() if k != "count" and isinstance(v, dict)]
+                for stat_obj in raw:
+                    if isinstance(stat_obj, dict) and "stat" in stat_obj:
+                        s = stat_obj["stat"]
+                        sid = str(s.get("stat_id", ""))
+                        name = sid_to_name(sid, stat_map)
+                        val = str(s.get("value", "0")).strip()
+                        if val in ("-", "", "None", "N/A"): val = "0"
+                        cat_stats[name] = to_float(val)
+
+            if team_key:
+                teams.append({
+                    "team_key": team_key, "name": team_name or "Unknown",
+                    "rank": rank, "wins": wins, "losses": losses, "ties": ties,
+                    "stats": cat_stats,
+                })
+        return teams
+    except Exception:
+        return []
+
+
 # ── 主程式 ────────────────────────────────────────────────────────────────────
 
 def main():
