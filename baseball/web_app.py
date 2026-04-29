@@ -618,7 +618,8 @@ function renderTradeAdvCard(data) {
     </div>`;
   const sv = data.savant;
   if (sv && sv.sections && sv.sections.length) {
-    html += `<div class="pct-section-title" style="margin-top:0">Baseball Savant 百分位</div>`;
+    const slabel = sv.season_label ? ` <span style="color:#f59e0b;font-size:.75rem">${sv.season_label}</span>` : "";
+    html += `<div class="pct-section-title" style="margin-top:0">Baseball Savant 百分位${slabel}</div>`;
     sv.sections.forEach(sec => {
       html += `<div class="pct-section-title">${sec.name}</div>`;
       sec.stats.forEach(st => {
@@ -982,7 +983,8 @@ function renderAdvancedStats(data) {
   // Savant 百分位
   const sv = data.savant;
   if (sv && sv.sections && sv.sections.length) {
-    html += `<div class="section-card"><h3>Baseball Savant 百分位排名</h3>`;
+    const slabel = sv.season_label ? ` <span style="font-weight:400;color:#f59e0b;font-size:.78rem;text-transform:none">${sv.season_label}</span>` : "";
+    html += `<div class="section-card"><h3>Baseball Savant 百分位排名${slabel}</h3>`;
     sv.sections.forEach(sec => {
       html += `<div class="pct-section-title">${sec.name}</div>`;
       sec.stats.forEach(st => {

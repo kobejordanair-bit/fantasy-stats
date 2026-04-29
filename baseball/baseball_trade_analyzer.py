@@ -955,23 +955,35 @@ def _parse_savant_flat(raw, fields):
 
 def fetch_savant_percentiles(mlbam_id: int, player_type: str) -> dict:
     """Baseball Savant 百分位排名。player_type: 'batter' | 'pitcher'"""
-    url = (f"https://baseballsavant.mlb.com/player-services/percentile-ranks"
-           f"?type={player_type}&playerId={mlbam_id}")
-    try:
-        resp = requests.get(url, headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/124.0.0.0 Safari/537.36"
-        }, timeout=15)
-        if resp.status_code != 200:
-            return {"error": f"Savant HTTP {resp.status_code}"}
-        raw = resp.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-    fields = SAVANT_BATTER_FIELDS if player_type == "batter" else SAVANT_PITCHER_FIELDS
-    sections = _parse_savant_flat(raw, fields)
-    return {"mlbam_id": mlbam_id, "player_type": player_type, "sections": sections}
+    import datetime
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/124.0.0.0 Safari/537.36"
+    }
+    current_year = datetime.date.today().year
+    for season in [current_year, current_year - 1]:
+        url = (f"https://baseballsavant.mlb.com/player-services/percentile-ranks"
+               f"?type={player_type}&playerId={mlbam_id}&season={season}")
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code == 404:
+                continue
+            if resp.status_code != 200:
+                return {"error": f"Savant HTTP {resp.status_code}"}
+            raw = resp.json()
+            if not raw:
+                continue
+            fields = SAVANT_BATTER_FIELDS if player_type == "batter" else SAVANT_PITCHER_FIELDS
+            sections = _parse_savant_flat(raw, fields)
+            if not sections:
+                continue
+            label = "" if season == current_year else f"（{season} 年，本季出賽不足）"
+            return {"mlbam_id": mlbam_id, "player_type": player_type,
+                    "sections": sections, "season_label": label}
+        except Exception as e:
+            return {"error": str(e)}
+    return {"error": "本季與去年均無 Savant 百分位數據（出賽不足）"}
 
 
 def fetch_fangraphs_stats(player_name: str, player_type: str, season: int = 0) -> dict:
