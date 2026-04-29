@@ -274,8 +274,9 @@ HTML = """<!DOCTYPE html>
 
   <!-- ── 我的名單 ── -->
   <div id="view-roster" class="view">
-    <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center">
+    <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button class="load-btn" onclick="loadRoster()">載入 / 重新整理</button>
+      <button class="load-btn" id="roster-csv-btn" onclick="exportRosterCSV()" style="display:none">匯出 CSV</button>
       <span style="color:#64748b;font-size:.85rem">首次載入約需 30–60 秒</span>
     </div>
     <div id="roster-loading" class="loading-box">
@@ -288,6 +289,7 @@ HTML = """<!DOCTYPE html>
   <div id="view-standings" class="view">
     <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center">
       <button class="load-btn" onclick="loadStandings()">載入 / 重新整理</button>
+      <button class="load-btn" id="standings-csv-btn" onclick="exportStandingsCSV()" style="display:none">匯出 CSV</button>
     </div>
     <div id="standings-loading" class="loading-box">
       <div class="spinner"></div><p style="margin-top:10px">抓取積分榜中...</p>
@@ -299,6 +301,7 @@ HTML = """<!DOCTYPE html>
 <script>
 const givePlayers = [], getPlayers = [];
 let debounceTimer = null;
+let rosterData = null, standingsData = null;
 
 // ── 導航 ──────────────────────────────────────────────────────────────────────
 function switchView(name) {
@@ -313,8 +316,11 @@ function getLeagueKey() {
 }
 
 function onLeagueChange() {
+  rosterData = null; standingsData = null;
   document.getElementById("roster-content").innerHTML = "";
   document.getElementById("standings-content").innerHTML = "";
+  document.getElementById("roster-csv-btn").style.display = "none";
+  document.getElementById("standings-csv-btn").style.display = "none";
 }
 
 // ── 聯盟載入 ─────────────────────────────────────────────────────────────────
@@ -479,6 +485,8 @@ async function loadRoster() {
 }
 
 function renderRoster(data) {
+  rosterData = data;
+  document.getElementById("roster-csv-btn").style.display = "inline-block";
   const periods = ["本季", "近14天", "近30天"];
   const cats = data.cats;
   let html = `<div class="period-tabs">` +
@@ -535,6 +543,8 @@ async function loadStandings() {
 }
 
 function renderStandings(data) {
+  standingsData = data;
+  document.getElementById("standings-csv-btn").style.display = "inline-block";
   const teams = data.teams, cats = data.cats, neg = data.negative_cats;
   const n = teams.length;
 
@@ -569,6 +579,57 @@ function renderStandings(data) {
   });
   html += `</tbody></table></div></div>`;
   document.getElementById("standings-content").innerHTML = html;
+}
+
+// ── CSV 匯出 ──────────────────────────────────────────────────────────────────
+function downloadCSV(filename, rows) {
+  const csv = rows.map(r =>
+    r.map(v => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")
+  ).join("\n");
+  const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+}
+
+function exportRosterCSV() {
+  if (!rosterData) return;
+  const periods = ["本季", "近14天", "近30天"];
+  const activeIdx = [...document.querySelectorAll("#view-roster .tab-btn")]
+    .findIndex(b => b.classList.contains("active"));
+  const period = periods[activeIdx >= 0 ? activeIdx : 0];
+  const cats = rosterData.cats;
+  const rows = [["球員", "守位", "球隊", "狀態", ...cats]];
+  rosterData.players.forEach(p => {
+    const stats = p.stats[period] || {};
+    rows.push([
+      p.name, p.position, p.team, p.status,
+      ...cats.map(c => {
+        const v = stats[c];
+        if (v == null) return "";
+        return rosterData.avg_cats.includes(c) ? Number(v).toFixed(3) : Math.round(v);
+      }),
+    ]);
+  });
+  downloadCSV(`我的名單_${period}.csv`, rows);
+}
+
+function exportStandingsCSV() {
+  if (!standingsData) return;
+  const cats = standingsData.cats;
+  const rows = [["排名", "球隊", "W", "L", "T", ...cats]];
+  [...standingsData.teams].sort((a, b) => (a.rank || 99) - (b.rank || 99)).forEach(t => {
+    rows.push([
+      t.rank ?? "", t.name, t.wins, t.losses, t.ties,
+      ...cats.map(c => {
+        const v = t.stats[c];
+        if (v == null) return "";
+        return standingsData.avg_cats.includes(c) ? Number(v).toFixed(3) : Math.round(v);
+      }),
+    ]);
+  });
+  downloadCSV("聯盟排名.csv", rows);
 }
 
 // ── 工具 ─────────────────────────────────────────────────────────────────────
