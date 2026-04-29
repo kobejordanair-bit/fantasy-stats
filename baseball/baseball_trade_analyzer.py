@@ -80,16 +80,17 @@ def authorize():
     return resp.json()["access_token"]
 
 
-def api_get(token, path, retries=3):
+def api_get(token, path, retries=2):
     url = f"{BASE_URL}{path}?format=json"
     for attempt in range(retries):
         try:
-            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"},
+                                timeout=(8, 20))  # (connect, read)
             if resp.status_code == 401:
                 raise ValueError("Token 過期，請重新執行")
             if resp.status_code == 999:
-                print("Yahoo 限速，等待 15 秒...")
-                time.sleep(15)
+                print("Yahoo 限速，等待 10 秒...")
+                time.sleep(10)
                 continue
             if resp.status_code != 200:
                 raise ValueError(f"API 錯誤 {resp.status_code}: {resp.text[:300]}")
@@ -98,7 +99,7 @@ def api_get(token, path, retries=3):
             raise
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep((attempt + 1) * 5)
+                time.sleep(3)
             else:
                 raise
 
