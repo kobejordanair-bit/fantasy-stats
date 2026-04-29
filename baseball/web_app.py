@@ -1216,6 +1216,24 @@ def api_trade_advanced():
     return jsonify({"players": results})
 
 
+@app.route("/api/savant_raw")
+def api_savant_raw():
+    """暫時 debug 用：回傳 Savant API 原始 JSON"""
+    import datetime, requests as _req
+    mlbam_id = request.args.get("id", "592450")
+    ptype    = request.args.get("type", "batter")
+    season   = request.args.get("season", str(datetime.date.today().year))
+    url = (f"https://baseballsavant.mlb.com/player-services/percentile-ranks"
+           f"?type={ptype}&playerId={mlbam_id}&season={season}")
+    try:
+        r = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        return jsonify({"status": r.status_code, "url": url,
+                        "type": str(type(r.json()).__name__),
+                        "preview": r.json()})
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
+
 @app.route("/api/savant")
 def api_savant():
     name     = request.args.get("name",     "").strip()
