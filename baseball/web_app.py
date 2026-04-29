@@ -1218,18 +1218,24 @@ def api_trade_advanced():
 
 @app.route("/api/savant_raw")
 def api_savant_raw():
-    """暫時 debug 用：回傳 Savant API 原始 JSON"""
-    import datetime, requests as _req
+    """暫時 debug 用：回傳 Savant API 原始內容"""
+    import requests as _req
     mlbam_id = request.args.get("id", "592450")
     ptype    = request.args.get("type", "batter")
-    season   = request.args.get("season", str(datetime.date.today().year))
-    url = (f"https://baseballsavant.mlb.com/player-services/percentile-ranks"
-           f"?type={ptype}&playerId={mlbam_id}&season={season}")
+    season   = request.args.get("season", "")
+    base = f"https://baseballsavant.mlb.com/player-services/percentile-ranks?type={ptype}&playerId={mlbam_id}"
+    url = base + (f"&season={season}" if season else "")
     try:
-        r = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        r = _req.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"}, timeout=15)
+        text = r.text[:2000]
+        try:
+            parsed = r.json()
+        except Exception:
+            parsed = None
         return jsonify({"status": r.status_code, "url": url,
-                        "type": str(type(r.json()).__name__),
-                        "preview": r.json()})
+                        "body_len": len(r.text), "text_preview": text,
+                        "parsed_type": type(parsed).__name__ if parsed is not None else "parse_failed",
+                        "parsed_preview": parsed})
     except Exception as e:
         return jsonify({"error": str(e)})
 
