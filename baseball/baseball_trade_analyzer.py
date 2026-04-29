@@ -89,6 +89,7 @@ def _http_get(token, url):
 
 def api_get(token, path, retries=2):
     url = f"{BASE_URL}{path}?format=json"
+    print(f"[API] GET {path}", flush=True)
     for attempt in range(retries):
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
@@ -97,6 +98,7 @@ def api_get(token, path, retries=2):
                     resp = future.result(timeout=25)
                 except concurrent.futures.TimeoutError:
                     raise TimeoutError("Yahoo API 無回應（含 DNS 解析），請確認網路連線")
+            print(f"[API] {resp.status_code} {path}", flush=True)
             if resp.status_code == 401:
                 raise ValueError("Token 過期，請重新執行")
             if resp.status_code == 999:
@@ -109,6 +111,7 @@ def api_get(token, path, retries=2):
         except ValueError:
             raise
         except Exception as e:
+            print(f"[API] 錯誤 attempt={attempt}: {e}", flush=True)
             if attempt < retries - 1:
                 time.sleep(3)
             else:
