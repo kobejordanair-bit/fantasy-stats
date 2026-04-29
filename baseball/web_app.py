@@ -386,13 +386,28 @@ function onLeagueChange() {
 
 // ── 聯盟載入 ─────────────────────────────────────────────────────────────────
 async function loadLeagues() {
-  const r = await fetch("/api/leagues");
-  if (!r.ok) { window.location = "/auth"; return; }
-  const leagues = await r.json();
   const sel = document.getElementById("league-select");
-  sel.innerHTML = leagues.map(l =>
-    `<option value="${l.key}">${l.name} (${l.season})</option>`
-  ).join("");
+  try {
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), 60000); // 60s timeout
+    const r = await fetch("/api/leagues", { signal: controller.signal });
+    clearTimeout(tid);
+    if (r.status === 401) { window.location = "/auth"; return; }
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      sel.innerHTML = `<option value="">載入失敗：${data.error || r.status}</option>`;
+      return;
+    }
+    if (!data.length) {
+      sel.innerHTML = `<option value="">找不到聯盟，請重新授權</option>`;
+      return;
+    }
+    sel.innerHTML = data.map(l =>
+      `<option value="${l.key}">${l.name} (${l.season})</option>`
+    ).join("");
+  } catch(e) {
+    sel.innerHTML = `<option value="">${e.name === "AbortError" ? "載入逾時，請重新整理" : "載入失敗：" + e.message}</option>`;
+  }
 }
 
 // ── 球員搜尋 ─────────────────────────────────────────────────────────────────
@@ -933,7 +948,10 @@ def api_leagues():
     if not token:
         return jsonify({"error": "未授權"}), 401
     if "leagues" not in _store:
-        _store["leagues"] = get_mlb_leagues(token)
+        try:
+            _store["leagues"] = get_mlb_leagues(token)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
     return jsonify(_store["leagues"])
 
 
@@ -1162,4 +1180,4 @@ if __name__ == "__main__":
     print("Yahoo Fantasy Baseball 交易分析器 - Web 介面")
     print("=" * 55)
     threading.Timer(1.0, lambda: webbrowser.open("http://localhost:5000")).start()
-    app.run(host="localhost", port=5000, debug=False)
+    app.run(host="localhost", port=5000, debug=False, threaded=True)
