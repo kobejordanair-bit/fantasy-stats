@@ -912,13 +912,36 @@ def lookup_mlbam_id(player_name: str):
     return int(float(mlbam))
 
 
+_pybaseball_lock = threading.Lock()   # 防止多 thread 同時寫 pybaseball 快取
+
+
 def _pct(series, val, lower_is_better=False):
     """百分位排名 0-100，lower_is_better=True 時數值越低排名越高"""
-    clean = series.dropna()
-    if len(clean) == 0:
+    try:
+        clean = series.apply(lambda x: _safe_float(x) if isinstance(x, str) else x)
+        clean = clean.dropna()
+        if len(clean) == 0:
+            return 50
+        p = int(round((clean < val).sum() / len(clean) * 100))
+        return (100 - p) if lower_is_better else p
+    except Exception:
         return 50
-    p = int(round((clean < val).sum() / len(clean) * 100))
-    return (100 - p) if lower_is_better else p
+
+
+def _safe_float(v):
+    """把可能帶有 % 或其他格式的值轉成 float（死穴 5 修正）"""
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).replace('%', '').replace(',', '').strip()
+    return float(s)
+
+
+def _resolve_col(df, *candidates):
+    """支援多個備選欄位名稱，回傳第一個存在的（死穴 4 修正）"""
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
 
 
 def fetch_savant_percentiles(mlbam_id: int, player_type: str, player_name: str = "") -> dict:
@@ -926,24 +949,24 @@ def fetch_savant_percentiles(mlbam_id: int, player_type: str, player_name: str =
     import datetime
     year = datetime.date.today().year
     for season in [year, year - 1]:
-        try:
-            sections = _calc_statcast_percentiles(mlbam_id, player_name, player_type, season)
-            if sections:
-                label = "" if season == year else f"（{season} 年，本季出賽不足）"
-                return {"mlbam_id": mlbam_id, "player_type": player_type,
-                        "sections": sections, "season_label": label}
-        except Exception:
-            continue
+        sections = _calc_statcast_percentiles(mlbam_id, player_name, player_type, season)
+        if sections:
+            label = "" if season == year else f"（{season} 年，本季出賽不足）"
+            return {"mlbam_id": mlbam_id, "player_type": player_type,
+                    "sections": sections, "season_label": label}
     return {"error": "無法取得百分位數據（出賽不足或查無此人）"}
 
 
 def _find_by_id(df, mlbam_id):
-    """在 Statcast leaderboard 中用 MLBAM ID 找球員"""
+    """用 MLBAM ID 找球員，處理 int/float/str 型別不一致（死穴 3 修正）"""
+    target = str(int(mlbam_id))
     for col in ("player_id", "batter", "pitcher", "mlbam_id"):
-        if col in df.columns:
-            match = df[df[col] == mlbam_id]
-            if not match.empty:
-                return match.iloc[0]
+        if col not in df.columns:
+            continue
+        col_str = df[col].astype(str).str.split('.').str[0]
+        match = df[col_str == target]
+        if not match.empty:
+            return match.iloc[0]
     return None
 
 
@@ -959,14 +982,19 @@ def _find_by_name(df, player_name):
 
 
 def _add_stats(sections, df, row, stat_defs, section_name):
-    """計算各項數據的百分位並加入 sections"""
-    for col, label, lib in stat_defs:
-        if col not in df.columns:
+    """計算各項數據的百分位並加入 sections（支援備選欄位名、% 字串）"""
+    for candidates, label, lib in stat_defs:
+        if isinstance(candidates, str):
+            candidates = (candidates,)
+        col = _resolve_col(df, *candidates)   # 死穴 4：備選欄位名
+        if col is None:
             continue
         try:
-            val = float(row[col])
-            p = _pct(df[col], val, lib)
-            if "%" in col:
+            val = _safe_float(row[col])        # 死穴 5：% 字串轉型
+            pct_series = df[col]
+            p = _pct(pct_series, val, lib)
+            # 自動判斷 % 格式（FanGraphs K% 是 0~1，Statcast 是 0~100）
+            if "%" in col or col in ("brl_percent", "ev95percent", "hard_hit_percent"):
                 disp = f"{val*100:.1f}%" if val <= 1.5 else f"{val:.1f}%"
             elif col in ("wOBA", "BABIP", "ISO", "est_ba", "est_slg",
                          "est_woba", "ba", "slg", "woba"):
@@ -977,7 +1005,8 @@ def _add_stats(sections, df, row, stat_defs, section_name):
                 disp = f"{val:.1f}"
             sections.setdefault(section_name, []).append({
                 "key": col, "label": label, "percentile": p, "value": disp})
-        except Exception:
+        except Exception as e:
+            print(f"[percentile] {label} ({col}) 計算失敗: {e}", flush=True)
             continue
 
 
@@ -985,102 +1014,110 @@ def _calc_statcast_percentiles(mlbam_id, player_name, player_type, season):
     sections: dict = {}
 
     if player_type == "batter":
-        # ① Statcast 出棒品質
+        # ① Statcast 出棒品質（死穴 1：用 minBBE 不是 min_bbe）
         try:
             from pybaseball import statcast_batter_exitvelo_barrels
-            df = statcast_batter_exitvelo_barrels(season, min_bbe=10)
+            with _pybaseball_lock:
+                df = statcast_batter_exitvelo_barrels(season, minBBE=10)
             if df is not None and not df.empty:
                 row = _find_by_id(df, mlbam_id)
                 if row is not None:
                     _add_stats(sections, df, row, [
-                        ("avg_hit_speed",   "Avg Exit Velo", False),
-                        ("brl_percent",     "Barrel %",      False),
-                        ("ev95percent",     "EV 95+ %",      False),
+                        (("avg_hit_speed", "exit_velocity_avg"), "Avg Exit Velo", False),
+                        (("brl_percent", "barrel_batted_rate"),  "Barrel %",      False),
+                        (("ev95percent",),                       "EV 95+ %",      False),
+                        (("hard_hit_percent",),                  "Hard-Hit %",    False),
                     ], "Statcast 出棒品質")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[percentile] batter exitvelo 失敗: {e}", flush=True)
 
         # ② Expected Stats
         try:
             from pybaseball import statcast_batter_expected_stats
-            df = statcast_batter_expected_stats(season, minPA=10)
+            with _pybaseball_lock:
+                df = statcast_batter_expected_stats(season, minPA=10)
             if df is not None and not df.empty:
                 row = _find_by_id(df, mlbam_id)
                 if row is not None:
                     _add_stats(sections, df, row, [
-                        ("est_ba",   "xBA",   False),
-                        ("est_slg",  "xSLG",  False),
-                        ("est_woba", "xwOBA", False),
+                        (("est_ba",),   "xBA",   False),
+                        (("est_slg",),  "xSLG",  False),
+                        (("est_woba",), "xwOBA", False),
                     ], "Expected Stats")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[percentile] batter expected_stats 失敗: {e}", flush=True)
 
         # ③ FanGraphs
         try:
             from pybaseball import batting_stats
-            df = batting_stats(season, qual=1)
+            with _pybaseball_lock:
+                df = batting_stats(season, qual=1)
             if df is not None and not df.empty and player_name:
                 row = _find_by_name(df, player_name)
                 if row is not None:
                     _add_stats(sections, df, row, [
-                        ("wRC+",  "wRC+",  False),
-                        ("wOBA",  "wOBA",  False),
-                        ("BB%",   "BB%",   False),
-                        ("K%",    "K%",    True),
-                        ("ISO",   "ISO",   False),
-                        ("WAR",   "WAR",   False),
+                        (("wRC+",),  "wRC+",  False),
+                        (("wOBA",),  "wOBA",  False),
+                        (("BB%",),   "BB%",   False),
+                        (("K%",),    "K%",    True),
+                        (("ISO",),   "ISO",   False),
+                        (("WAR",),   "WAR",   False),
                     ], "FanGraphs")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[percentile] batter FanGraphs 失敗: {e}", flush=True)
 
     else:  # pitcher
         # ① Statcast 被打品質
         try:
             from pybaseball import statcast_pitcher_exitvelo_barrels
-            df = statcast_pitcher_exitvelo_barrels(season, min_bbe=10)
+            with _pybaseball_lock:
+                df = statcast_pitcher_exitvelo_barrels(season, minBBE=10)
             if df is not None and not df.empty:
                 row = _find_by_id(df, mlbam_id)
                 if row is not None:
                     _add_stats(sections, df, row, [
-                        ("avg_hit_speed", "Avg Exit Velo", True),
-                        ("brl_percent",   "Barrel %",      True),
-                        ("ev95percent",   "EV 95+ %",      True),
+                        (("avg_hit_speed", "exit_velocity_avg"), "Avg Exit Velo", True),
+                        (("brl_percent", "barrel_batted_rate"),  "Barrel %",      True),
+                        (("ev95percent",),                       "EV 95+ %",      True),
+                        (("hard_hit_percent",),                  "Hard-Hit %",    True),
                     ], "Statcast 被打品質")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[percentile] pitcher exitvelo 失敗: {e}", flush=True)
 
         # ② Expected Stats
         try:
             from pybaseball import statcast_pitcher_expected_stats
-            df = statcast_pitcher_expected_stats(season, minPA=10)
+            with _pybaseball_lock:
+                df = statcast_pitcher_expected_stats(season, minPA=10)
             if df is not None and not df.empty:
                 row = _find_by_id(df, mlbam_id)
                 if row is not None:
                     _add_stats(sections, df, row, [
-                        ("est_ba",   "xBA",   True),
-                        ("est_woba", "xwOBA", True),
+                        (("est_ba",),   "xBA",   True),
+                        (("est_woba",), "xwOBA", True),
                     ], "Expected Stats")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[percentile] pitcher expected_stats 失敗: {e}", flush=True)
 
         # ③ FanGraphs
         try:
             from pybaseball import pitching_stats
-            df = pitching_stats(season, qual=1)
+            with _pybaseball_lock:
+                df = pitching_stats(season, qual=1)
             if df is not None and not df.empty and player_name:
                 row = _find_by_name(df, player_name)
                 if row is not None:
                     _add_stats(sections, df, row, [
-                        ("FIP",   "FIP",   True),
-                        ("xFIP",  "xFIP",  True),
-                        ("ERA",   "ERA",   True),
-                        ("K%",    "K%",    False),
-                        ("BB%",   "BB%",   True),
-                        ("K-BB%", "K-BB%", False),
-                        ("WAR",   "WAR",   False),
+                        (("FIP",),   "FIP",   True),
+                        (("xFIP",),  "xFIP",  True),
+                        (("ERA",),   "ERA",   True),
+                        (("K%",),    "K%",    False),
+                        (("BB%",),   "BB%",   True),
+                        (("K-BB%",), "K-BB%", False),
+                        (("WAR",),   "WAR",   False),
                     ], "FanGraphs")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[percentile] pitcher FanGraphs 失敗: {e}", flush=True)
 
     order = ["Statcast 出棒品質", "Statcast 被打品質", "Expected Stats", "FanGraphs"]
     return [{"name": s, "stats": sections[s]} for s in order if s in sections]

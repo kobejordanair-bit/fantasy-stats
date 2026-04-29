@@ -29,7 +29,38 @@ app.secret_key = secrets.token_hex(32)
 # 與籃球版共用同一個 redirect URI，不需要本地 HTTPS
 WEB_REDIRECT_URI = "https://localhost:8080"
 
+_TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yahoo_tokens.json")
 _store = {}   # token, refresh_token, leagues, stat_maps
+
+
+def _save_tokens():
+    """把 token 寫入磁碟，重啟程式後不需重新授權"""
+    try:
+        with open(_TOKEN_FILE, "w") as f:
+            import json
+            json.dump({"token": _store.get("token"),
+                       "refresh_token": _store.get("refresh_token")}, f)
+    except Exception as e:
+        print(f"[Auth] 儲存 token 失敗: {e}", flush=True)
+
+
+def _load_tokens():
+    """啟動時從磁碟讀取已儲存的 token"""
+    try:
+        if os.path.exists(_TOKEN_FILE):
+            import json
+            with open(_TOKEN_FILE) as f:
+                data = json.load(f)
+            if data.get("token"):
+                _store["token"] = data["token"]
+            if data.get("refresh_token"):
+                _store["refresh_token"] = data["refresh_token"]
+            print("[Auth] 已從磁碟讀取 token", flush=True)
+    except Exception as e:
+        print(f"[Auth] 讀取 token 失敗: {e}", flush=True)
+
+
+_load_tokens()
 
 
 def _do_refresh():
@@ -51,6 +82,7 @@ def _do_refresh():
             _store["refresh_token"] = data["refresh_token"]
         _store.pop("leagues", None)
         _store.pop("stat_maps", None)
+        _save_tokens()
         print("[Auth] Token 已自動更新", flush=True)
         return True
     except Exception as e:
@@ -1130,6 +1162,7 @@ def api_token():
     _store["refresh_token"] = data.get("refresh_token", "")
     _store.pop("leagues", None)
     _store.pop("stat_maps", None)
+    _save_tokens()
     return jsonify({"ok": True})
 
 
