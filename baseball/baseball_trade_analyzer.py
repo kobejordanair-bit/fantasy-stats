@@ -7,7 +7,6 @@ Yahoo Fantasy Baseball - 交易分析器
 """
 
 import requests, json, os, time, webbrowser
-import concurrent.futures
 from urllib.parse import urlparse, parse_qs
 from collections import defaultdict
 from dotenv import load_dotenv
@@ -92,12 +91,7 @@ def api_get(token, path, retries=2):
     print(f"[API] GET {path}", flush=True)
     for attempt in range(retries):
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                future = ex.submit(_http_get, token, url)
-                try:
-                    resp = future.result(timeout=25)
-                except concurrent.futures.TimeoutError:
-                    raise TimeoutError("Yahoo API 無回應（含 DNS 解析），請確認網路連線")
+            resp = _http_get(token, url)
             print(f"[API] {resp.status_code} {path}", flush=True)
             if resp.status_code == 401:
                 raise ValueError("Token 過期，請重新執行")
