@@ -20,6 +20,7 @@ from baseball_trade_analyzer import (
     fetch_splits_statcast, fetch_date_range_stats,
     LEAGUES, CLIENT_ID, CLIENT_SECRET,
     AUTH_URL, TOKEN_URL, AVG_CATS,
+    TokenExpiredError,
 )
 
 app = Flask(__name__)
@@ -28,7 +29,47 @@ app.secret_key = secrets.token_hex(32)
 # 與籃球版共用同一個 redirect URI，不需要本地 HTTPS
 WEB_REDIRECT_URI = "https://localhost:8080"
 
-_store = {}   # token, leagues, stat_maps
+_store = {}   # token, refresh_token, leagues, stat_maps
+
+
+def _do_refresh():
+    """用 refresh_token 換新的 access_token，成功回傳 True。"""
+    rt = _store.get("refresh_token")
+    if not rt:
+        return False
+    try:
+        resp = http.post(TOKEN_URL,
+                         data={"grant_type": "refresh_token", "refresh_token": rt},
+                         auth=(CLIENT_ID, CLIENT_SECRET),
+                         timeout=(8, 20))
+        if resp.status_code != 200:
+            print(f"[Auth] refresh 失敗 {resp.status_code}: {resp.text[:200]}", flush=True)
+            return False
+        data = resp.json()
+        _store["token"] = data["access_token"]
+        if "refresh_token" in data:
+            _store["refresh_token"] = data["refresh_token"]
+        _store.pop("leagues", None)
+        _store.pop("stat_maps", None)
+        print("[Auth] Token 已自動更新", flush=True)
+        return True
+    except Exception as e:
+        print(f"[Auth] refresh 例外: {e}", flush=True)
+        return False
+
+
+def _call(fn):
+    """呼叫 fn(token)，遇到 TokenExpiredError 自動 refresh 後重試一次。"""
+    token = _store.get("token")
+    if not token:
+        raise PermissionError("未授權")
+    try:
+        return fn(token)
+    except TokenExpiredError:
+        print("[Auth] Token 過期，嘗試自動更新...", flush=True)
+        if _do_refresh():
+            return fn(_store["token"])
+        raise PermissionError("Token 過期，請重新授權")
 
 # ── 授權頁面 ──────────────────────────────────────────────────────────────────
 
@@ -360,7 +401,6 @@ HTML = """<!DOCTYPE html>
 </main>
 
 <script>
-console.log("[debug] script loaded");
 const givePlayers = [], getPlayers = [];
 let debounceTimer = null;
 let rosterData = null, standingsData = null;
@@ -387,15 +427,12 @@ function onLeagueChange() {
 
 // ── 聯盟載入 ─────────────────────────────────────────────────────────────────
 async function loadLeagues() {
-  console.log("[debug] loadLeagues() called");
   const sel = document.getElementById("league-select");
   try {
-    console.log("[debug] sending fetch /api/leagues");
     const controller = new AbortController();
-    const tid = setTimeout(() => controller.abort(), 60000); // 60s timeout
+    const tid = setTimeout(() => controller.abort(), 60000);
     const r = await fetch("/api/leagues", { signal: controller.signal });
     clearTimeout(tid);
-    console.log("[debug] /api/leagues response status:", r.status);
     if (r.status === 401) { window.location = "/auth"; return; }
     const data = await r.json();
     if (!r.ok || data.error) {
@@ -409,9 +446,7 @@ async function loadLeagues() {
     sel.innerHTML = data.map(l =>
       `<option value="${l.key}">${l.name} (${l.season})</option>`
     ).join("");
-    console.log("[debug] leagues loaded:", data.length);
   } catch(e) {
-    console.error("[debug] loadLeagues error:", e);
     sel.innerHTML = `<option value="">${e.name === "AbortError" ? "載入逾時，請重新整理" : "載入失敗：" + e.message}</option>`;
   }
 }
@@ -942,7 +977,9 @@ def api_token():
                      auth=(CLIENT_ID, CLIENT_SECRET))
     if resp.status_code != 200:
         return jsonify({"error": f"Token 取得失敗：{resp.text}"}), 400
-    _store["token"] = resp.json()["access_token"]
+    data = resp.json()
+    _store["token"] = data["access_token"]
+    _store["refresh_token"] = data.get("refresh_token", "")
     _store.pop("leagues", None)
     _store.pop("stat_maps", None)
     return jsonify({"ok": True})
@@ -950,96 +987,79 @@ def api_token():
 
 @app.route("/api/leagues")
 def api_leagues():
-    print("[Flask] /api/leagues hit", flush=True)
-    token = _store.get("token")
-    if not token:
-        print("[Flask] /api/leagues -> 401 no token", flush=True)
-        return jsonify({"error": "未授權"}), 401
-    if "leagues" not in _store:
-        print("[Flask] /api/leagues -> calling get_mlb_leagues", flush=True)
-        try:
-            _store["leagues"] = get_mlb_leagues(token)
-        except Exception as e:
-            print(f"[Flask] /api/leagues -> error: {e}", flush=True)
-            return jsonify({"error": str(e)}), 500
-    print(f"[Flask] /api/leagues -> returning {len(_store['leagues'])} leagues", flush=True)
-    return jsonify(_store["leagues"])
+    try:
+        if "leagues" not in _store:
+            _store["leagues"] = _call(get_mlb_leagues)
+        return jsonify(_store["leagues"])
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/search")
 def api_search():
-    token = _store.get("token")
-    if not token:
-        return jsonify({"error": "未授權"}), 401
     name = request.args.get("name", "").strip()
     league_key = request.args.get("league_key", "").strip()
     if not name or not league_key:
         return jsonify([])
-    return jsonify(search_players_web(token, league_key, name))
+    try:
+        return jsonify(_call(lambda t: search_players_web(t, league_key, name)))
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
-    token = _store.get("token")
-    if not token:
-        return jsonify({"error": "未授權"}), 401
-
     body = request.get_json(force=True)
     league_key   = body.get("league_key", "")
     give_players = body.get("give", [])
     get_players  = body.get("get",  [])
-
     if not league_key or not give_players or not get_players:
         return jsonify({"error": "缺少必要參數"}), 400
 
-    leagues = _store.get("leagues", [])
-    league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
-    league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
+    try:
+        leagues = _store.get("leagues", [])
+        league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
+        league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
 
-    stat_maps = _store.setdefault("stat_maps", {})
-    if league_key not in stat_maps:
-        stat_maps[league_key] = get_stat_map(token, league_key)
-    stat_map = stat_maps[league_key]
+        stat_maps = _store.setdefault("stat_maps", {})
+        if league_key not in stat_maps:
+            stat_maps[league_key] = _call(lambda t: get_stat_map(t, league_key))
 
-    result = run_analysis(token, league_key, league_cfg, stat_map, give_players, get_players)
-    return jsonify(result)
+        result = _call(lambda t: run_analysis(t, league_key, league_cfg, stat_maps[league_key], give_players, get_players))
+        return jsonify(result)
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/savant")
 def api_savant():
-    token = _store.get("token")
-    if not token:
-        return jsonify({"error": "未授權"}), 401
     name     = request.args.get("name",     "").strip()
     position = request.args.get("position", "").strip()
     if not name:
         return jsonify({"error": "缺少球員名稱"}), 400
-
     pitcher_pos = {"SP", "RP", "P"}
     player_type = "pitcher" if any(p in position.upper() for p in pitcher_pos) else "batter"
-
     try:
         mlbam_id = lookup_mlbam_id(name)
     except ImportError as e:
         return jsonify({"error": str(e)}), 500
     if not mlbam_id:
         return jsonify({"error": f"找不到「{name}」的 MLBAM ID，請確認英文拼寫"}), 404
-
     savant_data = fetch_savant_percentiles(mlbam_id, player_type)
     fg_data     = fetch_fangraphs_stats(name, player_type)
-
-    return jsonify({
-        "name": name, "player_type": player_type,
-        "mlbam_id": mlbam_id,
-        "savant": savant_data, "fangraphs": fg_data,
-    })
+    return jsonify({"name": name, "player_type": player_type,
+                    "mlbam_id": mlbam_id,
+                    "savant": savant_data, "fangraphs": fg_data})
 
 
 @app.route("/api/splits")
 def api_splits():
-    token = _store.get("token")
-    if not token:
-        return jsonify({"error": "未授權"}), 401
     try:
         mlbam_id    = int(request.args.get("mlbam_id", 0))
         player_type = request.args.get("player_type", "batter").strip()
@@ -1054,9 +1074,6 @@ def api_splits():
 
 @app.route("/api/date_range")
 def api_date_range():
-    token = _store.get("token")
-    if not token:
-        return jsonify({"error": "未授權"}), 401
     name     = request.args.get("name",     "").strip()
     position = request.args.get("position", "").strip()
     start    = request.args.get("start",    "").strip()
@@ -1070,114 +1087,107 @@ def api_date_range():
 
 @app.route("/api/my_roster")
 def api_my_roster():
-    token = _store.get("token")
-    if not token:
-        return jsonify({"error": "未授權"}), 401
     league_key = request.args.get("league_key", "").strip()
     if not league_key:
         return jsonify({"error": "缺少 league_key"}), 400
+    try:
+        my_teams = _call(get_my_team_key)
+        team_key = my_teams.get(league_key)
+        if not team_key:
+            return jsonify({"error": "找不到此聯盟中的球隊"}), 404
 
-    my_teams = get_my_team_key(token)
-    team_key = my_teams.get(league_key)
-    if not team_key:
-        return jsonify({"error": "找不到此聯盟中的球隊"}), 404
+        stat_maps = _store.setdefault("stat_maps", {})
+        if league_key not in stat_maps:
+            stat_maps[league_key] = _call(lambda t: get_stat_map(t, league_key))
+        stat_map = stat_maps[league_key]
 
-    stat_maps = _store.setdefault("stat_maps", {})
-    if league_key not in stat_maps:
-        stat_maps[league_key] = get_stat_map(token, league_key)
-    stat_map = stat_maps[league_key]
+        leagues = _store.get("leagues", [])
+        league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
+        league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
+        all_cats = league_cfg["batter_cats"] + league_cfg["pitcher_cats"]
 
-    leagues = _store.get("leagues", [])
-    league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
-    league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
-    all_cats = league_cfg["batter_cats"] + league_cfg["pitcher_cats"]
-
-    roster = get_team_roster(token, team_key)
-    stat_types = {"本季": "season", "近14天": "last_week", "近30天": "last_month"}
-
-    players_out = []
-    for player in roster:
-        player_stats = {}
-        for period, stype in stat_types.items():
-            player_stats[period] = fetch_player_stats(
-                token, league_key, player["key"], stype, stat_map)
-            time.sleep(0.2)
-        players_out.append({
-            "name": player["name"], "position": player["position"],
-            "team": player["team"], "status": player["status"],
-            "stats": player_stats,
-        })
-
-    avg_cats = [c for c in all_cats if c in AVG_CATS]
-    return jsonify({"players": players_out, "cats": all_cats, "avg_cats": avg_cats})
+        roster = _call(lambda t: get_team_roster(t, team_key))
+        stat_types = {"本季": "season", "近14天": "last_week", "近30天": "last_month"}
+        players_out = []
+        for player in roster:
+            player_stats = {}
+            for period, stype in stat_types.items():
+                player_stats[period] = _call(
+                    lambda t, k=player["key"], s=stype: fetch_player_stats(t, league_key, k, s, stat_map))
+                time.sleep(0.2)
+            players_out.append({"name": player["name"], "position": player["position"],
+                                 "team": player["team"], "status": player["status"],
+                                 "stats": player_stats})
+        avg_cats = [c for c in all_cats if c in AVG_CATS]
+        return jsonify({"players": players_out, "cats": all_cats, "avg_cats": avg_cats})
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/standings")
 def api_standings():
-    token = _store.get("token")
-    if not token:
-        return jsonify({"error": "未授權"}), 401
     league_key = request.args.get("league_key", "").strip()
     if not league_key:
         return jsonify({"error": "缺少 league_key"}), 400
+    try:
+        stat_maps = _store.setdefault("stat_maps", {})
+        if league_key not in stat_maps:
+            stat_maps[league_key] = _call(lambda t: get_stat_map(t, league_key))
+        stat_map = stat_maps[league_key]
 
-    stat_maps = _store.setdefault("stat_maps", {})
-    if league_key not in stat_maps:
-        stat_maps[league_key] = get_stat_map(token, league_key)
-    stat_map = stat_maps[league_key]
+        leagues = _store.get("leagues", [])
+        league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
+        league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
+        all_cats = league_cfg["batter_cats"] + league_cfg["pitcher_cats"]
+        negative_cats = list(league_cfg["negative"])
+        avg_cats = [c for c in all_cats if c in AVG_CATS]
 
-    leagues = _store.get("leagues", [])
-    league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
-    league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
-    all_cats = league_cfg["batter_cats"] + league_cfg["pitcher_cats"]
-    negative_cats = list(league_cfg["negative"])
-    avg_cats = [c for c in all_cats if c in AVG_CATS]
-
-    teams = get_standings(token, league_key, stat_map)
-    return jsonify({
-        "teams": teams, "cats": all_cats,
-        "negative_cats": negative_cats, "avg_cats": avg_cats,
-    })
+        teams = _call(lambda t: get_standings(t, league_key, stat_map))
+        return jsonify({"teams": teams, "cats": all_cats,
+                        "negative_cats": negative_cats, "avg_cats": avg_cats})
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/team_roster")
 def api_team_roster():
-    token = _store.get("token")
-    if not token:
-        return jsonify({"error": "未授權"}), 401
     league_key = request.args.get("league_key", "").strip()
     team_key   = request.args.get("team_key",   "").strip()
     if not league_key or not team_key:
         return jsonify({"error": "缺少 league_key 或 team_key"}), 400
+    try:
+        stat_maps = _store.setdefault("stat_maps", {})
+        if league_key not in stat_maps:
+            stat_maps[league_key] = _call(lambda t: get_stat_map(t, league_key))
+        stat_map = stat_maps[league_key]
 
-    stat_maps = _store.setdefault("stat_maps", {})
-    if league_key not in stat_maps:
-        stat_maps[league_key] = get_stat_map(token, league_key)
-    stat_map = stat_maps[league_key]
+        leagues = _store.get("leagues", [])
+        league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
+        league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
+        all_cats = league_cfg["batter_cats"] + league_cfg["pitcher_cats"]
 
-    leagues = _store.get("leagues", [])
-    league_id = next((str(lg.get("id", "")) for lg in leagues if lg["key"] == league_key), "")
-    league_cfg = next((cfg for cfg in LEAGUES.values() if cfg["id"] == league_id), LEAGUES["1"])
-    all_cats = league_cfg["batter_cats"] + league_cfg["pitcher_cats"]
-
-    roster = get_team_roster(token, team_key)
-    stat_types = {"本季": "season", "近14天": "last_week", "近30天": "last_month"}
-
-    players_out = []
-    for player in roster:
-        player_stats = {}
-        for period, stype in stat_types.items():
-            player_stats[period] = fetch_player_stats(
-                token, league_key, player["key"], stype, stat_map)
-            time.sleep(0.2)
-        players_out.append({
-            "name": player["name"], "position": player["position"],
-            "team": player["team"], "status": player["status"],
-            "stats": player_stats,
-        })
-
-    avg_cats = [c for c in all_cats if c in AVG_CATS]
-    return jsonify({"players": players_out, "cats": all_cats, "avg_cats": avg_cats})
+        roster = _call(lambda t: get_team_roster(t, team_key))
+        stat_types = {"本季": "season", "近14天": "last_week", "近30天": "last_month"}
+        players_out = []
+        for player in roster:
+            player_stats = {}
+            for period, stype in stat_types.items():
+                player_stats[period] = _call(
+                    lambda t, k=player["key"], s=stype: fetch_player_stats(t, league_key, k, s, stat_map))
+                time.sleep(0.2)
+            players_out.append({"name": player["name"], "position": player["position"],
+                                 "team": player["team"], "status": player["status"],
+                                 "stats": player_stats})
+        avg_cats = [c for c in all_cats if c in AVG_CATS]
+        return jsonify({"players": players_out, "cats": all_cats, "avg_cats": avg_cats})
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
