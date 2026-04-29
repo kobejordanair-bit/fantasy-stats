@@ -6,7 +6,7 @@ Yahoo Fantasy Baseball - 交易分析器
   2. SICCO_D_CUP (ID: 218188)
 """
 
-import requests, json, os, time, webbrowser
+import requests, json, os, time, webbrowser, threading
 from urllib.parse import urlparse, parse_qs
 from collections import defaultdict
 from dotenv import load_dotenv
@@ -84,10 +84,26 @@ class TokenExpiredError(Exception):
     pass
 
 
-def _http_get(token, url):
-    return requests.get(url,
-                        headers={"Authorization": f"Bearer {token}"},
-                        timeout=(8, 20))
+def _http_get(token, url, hard_timeout=25):
+    """daemon thread 保證 hard_timeout 秒後一定回來，不受 Windows socket 阻塞影響。"""
+    result = [None, None]   # [response, exception]
+
+    def _run():
+        try:
+            result[0] = requests.get(url,
+                                     headers={"Authorization": f"Bearer {token}"},
+                                     timeout=(8, 20))
+        except Exception as exc:
+            result[1] = exc
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=hard_timeout)
+    if t.is_alive():
+        raise TimeoutError(f"Yahoo API {hard_timeout} 秒無回應，請確認網路連線")
+    if result[1] is not None:
+        raise result[1]
+    return result[0]
 
 
 def api_get(token, path, retries=2):
