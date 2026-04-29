@@ -912,8 +912,94 @@ def lookup_mlbam_id(player_name: str):
     return int(float(mlbam))
 
 
+def _pct(series, val, lower_is_better=False):
+    """百分位排名 0-100，lower_is_better=True 時數值越低排名越高"""
+    clean = series.dropna()
+    if len(clean) == 0:
+        return 50
+    p = int(round((clean < val).sum() / len(clean) * 100))
+    return (100 - p) if lower_is_better else p
+
+
+def fetch_savant_percentiles(mlbam_id: int, player_type: str, player_name: str = "") -> dict:
+    """從 FanGraphs leaderboard 計算百分位排名（Savant API 已失效）"""
+    import datetime
+    year = datetime.date.today().year
+    for season in [year, year - 1]:
+        try:
+            sections = _calc_percentiles(player_name, player_type, season)
+            if sections:
+                label = "" if season == year else f"（{season} 年，本季出賽不足）"
+                return {"mlbam_id": mlbam_id, "player_type": player_type,
+                        "sections": sections, "season_label": label}
+        except Exception:
+            continue
+    return {"error": "無法取得百分位數據（出賽不足或查無此人）"}
+
+
+def _calc_percentiles(player_name: str, player_type: str, season: int) -> list:
+    """從 FanGraphs leaderboard 計算百分位，回傳 sections list"""
+    if player_type == "batter":
+        from pybaseball import batting_stats
+        df = batting_stats(season, qual=1)
+        stat_defs = [
+            ("WAR",   "WAR",   "綜合價值", False),
+            ("wRC+",  "wRC+",  "打擊",    False),
+            ("wOBA",  "wOBA",  "打擊",    False),
+            ("ISO",   "ISO",   "打擊",    False),
+            ("BABIP", "BABIP", "打擊",    False),
+            ("BB%",   "BB%",   "選球",    False),
+            ("K%",    "K%",    "選球",    True),
+        ]
+    else:
+        from pybaseball import pitching_stats
+        df = pitching_stats(season, qual=1)
+        stat_defs = [
+            ("WAR",   "WAR",   "綜合價值", False),
+            ("FIP",   "FIP",   "投球",    True),
+            ("xFIP",  "xFIP",  "投球",    True),
+            ("ERA",   "ERA",   "投球",    True),
+            ("K%",    "K%",    "三振",    False),
+            ("BB%",   "BB%",   "保送",    True),
+            ("K-BB%", "K-BB%", "三振",    False),
+        ]
+
+    if df is None or df.empty or not player_name:
+        return []
+
+    row = None
+    for token in [player_name] + player_name.strip().split():
+        mask = df["Name"].str.contains(token, case=False, na=False)
+        if mask.any():
+            row = df[mask].iloc[0]
+            break
+    if row is None:
+        return []
+
+    sections: dict = {}
+    for col, label, section, lib in stat_defs:
+        if col not in df.columns:
+            continue
+        try:
+            val = float(row[col])
+            p = _pct(df[col], val, lib)
+            if "%" in col:
+                disp = f"{val*100:.1f}%" if val <= 1 else f"{val:.1f}%"
+            elif col in ("wOBA", "BABIP", "ISO"):
+                disp = f"{val:.3f}"
+            else:
+                disp = f"{val:.1f}"
+            sections.setdefault(section, []).append({
+                "key": col, "label": label, "percentile": p, "value": disp})
+        except Exception:
+            continue
+
+    order = ["綜合價值", "打擊", "選球", "投球", "三振", "保送"]
+    return [{"name": s, "stats": sections[s]} for s in order if s in sections]
+
+
 def _parse_savant_flat(raw, fields):
-    """把 Savant API 各種回傳格式統一解析成 sections list"""
+    """把 Savant API 各種回傳格式統一解析成 sections list（已廢棄，保留相容）"""
     flat: dict = {}
     if isinstance(raw, list):
         for item in raw:
@@ -953,37 +1039,6 @@ def _parse_savant_flat(raw, fields):
     return [{"name": s, "stats": sections[s]} for s in order if s in sections]
 
 
-def fetch_savant_percentiles(mlbam_id: int, player_type: str) -> dict:
-    """Baseball Savant 百分位排名。player_type: 'batter' | 'pitcher'"""
-    import datetime
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/124.0.0.0 Safari/537.36"
-    }
-    current_year = datetime.date.today().year
-    for season in [current_year, current_year - 1]:
-        url = (f"https://baseballsavant.mlb.com/player-services/percentile-ranks"
-               f"?type={player_type}&playerId={mlbam_id}&season={season}")
-        try:
-            resp = requests.get(url, headers=headers, timeout=15)
-            if resp.status_code == 404:
-                continue
-            if resp.status_code != 200:
-                return {"error": f"Savant HTTP {resp.status_code}"}
-            raw = resp.json()
-            if not raw:
-                continue
-            fields = SAVANT_BATTER_FIELDS if player_type == "batter" else SAVANT_PITCHER_FIELDS
-            sections = _parse_savant_flat(raw, fields)
-            if not sections:
-                continue
-            label = "" if season == current_year else f"（{season} 年，本季出賽不足）"
-            return {"mlbam_id": mlbam_id, "player_type": player_type,
-                    "sections": sections, "season_label": label}
-        except Exception as e:
-            return {"error": str(e)}
-    return {"error": "本季與去年均無 Savant 百分位數據（出賽不足）"}
 
 
 def fetch_fangraphs_stats(player_name: str, player_type: str, season: int = 0) -> dict:
