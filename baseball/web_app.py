@@ -360,6 +360,7 @@ HTML = """<!DOCTYPE html>
 </main>
 
 <script>
+console.log("[debug] script loaded");
 const givePlayers = [], getPlayers = [];
 let debounceTimer = null;
 let rosterData = null, standingsData = null;
@@ -386,12 +387,15 @@ function onLeagueChange() {
 
 // ── 聯盟載入 ─────────────────────────────────────────────────────────────────
 async function loadLeagues() {
+  console.log("[debug] loadLeagues() called");
   const sel = document.getElementById("league-select");
   try {
+    console.log("[debug] sending fetch /api/leagues");
     const controller = new AbortController();
     const tid = setTimeout(() => controller.abort(), 60000); // 60s timeout
     const r = await fetch("/api/leagues", { signal: controller.signal });
     clearTimeout(tid);
+    console.log("[debug] /api/leagues response status:", r.status);
     if (r.status === 401) { window.location = "/auth"; return; }
     const data = await r.json();
     if (!r.ok || data.error) {
@@ -405,7 +409,9 @@ async function loadLeagues() {
     sel.innerHTML = data.map(l =>
       `<option value="${l.key}">${l.name} (${l.season})</option>`
     ).join("");
+    console.log("[debug] leagues loaded:", data.length);
   } catch(e) {
+    console.error("[debug] loadLeagues error:", e);
     sel.innerHTML = `<option value="">${e.name === "AbortError" ? "載入逾時，請重新整理" : "載入失敗：" + e.message}</option>`;
   }
 }
@@ -944,14 +950,19 @@ def api_token():
 
 @app.route("/api/leagues")
 def api_leagues():
+    print("[Flask] /api/leagues hit", flush=True)
     token = _store.get("token")
     if not token:
+        print("[Flask] /api/leagues -> 401 no token", flush=True)
         return jsonify({"error": "未授權"}), 401
     if "leagues" not in _store:
+        print("[Flask] /api/leagues -> calling get_mlb_leagues", flush=True)
         try:
             _store["leagues"] = get_mlb_leagues(token)
         except Exception as e:
+            print(f"[Flask] /api/leagues -> error: {e}", flush=True)
             return jsonify({"error": str(e)}), 500
+    print(f"[Flask] /api/leagues -> returning {len(_store['leagues'])} leagues", flush=True)
     return jsonify(_store["leagues"])
 
 
