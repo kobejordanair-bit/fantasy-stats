@@ -357,6 +357,23 @@ HTML = """<!DOCTYPE html>
   .trend-arrow.up   { color: #4ade80; font-size: 1rem; }
   .trend-arrow.down { color: #f87171; font-size: 1rem; }
   .trend-arrow.flat { color: #64748b; font-size: 1rem; }
+  /* ── 先發排程 ── */
+  .sched-week { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 8px; }
+  .sched-day  { flex: 0 0 180px; background: #1e293b; border: 1px solid #334155;
+                border-radius: 10px; overflow: hidden; }
+  .sched-day.today { border-color: #0ea5e9; }
+  .sched-day-hdr  { padding: 8px 12px; background: #0f172a; font-size: .75rem;
+                    font-weight: 700; color: #94a3b8; text-align: center; }
+  .sched-day.today .sched-day-hdr { color: #0ea5e9; }
+  .sched-game { padding: 8px 12px; border-top: 1px solid #1e293b3a; }
+  .sched-game + .sched-game { border-top-color: #334155; }
+  .sched-matchup { display: flex; align-items: center; gap: 5px;
+                   font-size: .78rem; color: #64748b; margin-bottom: 4px; }
+  .sched-abbr { font-weight: 700; color: #cbd5e1; font-size: .8rem; min-width: 30px; }
+  .sched-pitcher { font-size: .8rem; color: #e2e8f0; white-space: nowrap;
+                   overflow: hidden; text-overflow: ellipsis; }
+  .sched-tbd  { color: #475569; font-style: italic; }
+  .sched-empty { padding: 16px 12px; font-size: .8rem; color: #475569; text-align: center; }
 </style>
 </head>
 <body>
@@ -367,6 +384,7 @@ HTML = """<!DOCTYPE html>
     <button class="nav-btn" onclick="switchView('roster')">我的名單</button>
     <button class="nav-btn" onclick="switchView('standings')">聯盟排名</button>
     <button class="nav-btn" onclick="switchView('advanced')">進階數據</button>
+    <button class="nav-btn" onclick="switchView('schedule');loadSchedule()">先發排程</button>
   </nav>
 </header>
 <div id="league-bar">
@@ -456,6 +474,18 @@ HTML = """<!DOCTYPE html>
       <div id="date-range-content" style="color:#64748b;font-size:.85rem">請先選擇球員，再設定日期區間</div>
     </div>
   </div>
+
+  <!-- ── 先發排程 ── -->
+  <div id="view-schedule" class="view">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap">
+      <h2 style="margin:0;font-size:1rem;color:#e2e8f0">本週先發排程</h2>
+      <button class="load-btn" onclick="loadSchedule(true)">重新整理</button>
+    </div>
+    <div id="sched-loading" class="loading-box" style="display:none">
+      <div class="spinner"></div><p style="margin-top:10px">抓取 MLB 先發排程中...</p>
+    </div>
+    <div id="sched-content"></div>
+  </div>
 </main>
 
 <script>
@@ -487,6 +517,66 @@ function onLeagueChange() {
   document.getElementById("standings-content").innerHTML = "";
   document.getElementById("roster-csv-btn").style.display = "none";
   document.getElementById("standings-csv-btn").style.display = "none";
+}
+
+// ── 先發排程 ──────────────────────────────────────────────────────────────────
+let _schedLoaded = false;
+async function loadSchedule(force) {
+  if (_schedLoaded && !force) return;
+  const loading = document.getElementById("sched-loading");
+  const content = document.getElementById("sched-content");
+  loading.style.display = "flex";
+  content.innerHTML = "";
+  try {
+    const r = await fetch("/api/schedule");
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    renderSchedule(data);
+    _schedLoaded = true;
+  } catch(e) {
+    content.innerHTML = `<p style="color:#f87171">載入失敗：${e.message}</p>`;
+  } finally {
+    loading.style.display = "none";
+  }
+}
+
+function renderSchedule(data) {
+  const today = new Date().toISOString().slice(0, 10);
+  const days = data.days || [];
+  const DAY_ZH = ["日","一","二","三","四","五","六"];
+  const MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+  let html = '<div class="sched-week">';
+  for (const day of days) {
+    const d = new Date(day.date + "T12:00:00");
+    const isToday = day.date === today;
+    const label = `${d.getMonth()+1}/${d.getDate()} (${DAY_ZH[d.getDay()]})`;
+    html += `<div class="sched-day${isToday ? " today" : ""}">
+      <div class="sched-day-hdr">${isToday ? "▶ " : ""}${label}</div>`;
+    if (!day.games || !day.games.length) {
+      html += `<div class="sched-empty">休息日</div>`;
+    } else {
+      for (const g of day.games) {
+        const ap = g.away_pitcher;
+        const hp = g.home_pitcher;
+        const apName = ap && ap.name ? ap.name.split(" ").pop() : null;
+        const hpName = hp && hp.name ? hp.name.split(" ").pop() : null;
+        html += `<div class="sched-game">
+          <div class="sched-matchup">
+            <span class="sched-abbr">${g.away_team}</span>
+            <span>@</span>
+            <span class="sched-abbr">${g.home_team}</span>
+          </div>
+          <div class="sched-pitcher">${apName ? apName : '<span class="sched-tbd">TBD</span>'}</div>
+          <div style="font-size:.7rem;color:#475569;padding:1px 0">vs</div>
+          <div class="sched-pitcher">${hpName ? hpName : '<span class="sched-tbd">TBD</span>'}</div>
+        </div>`;
+      }
+    }
+    html += `</div>`;
+  }
+  html += "</div>";
+  document.getElementById("sched-content").innerHTML = html;
 }
 
 // ── 聯盟載入 ─────────────────────────────────────────────────────────────────
@@ -1455,6 +1545,48 @@ def api_team_roster():
         return jsonify({"error": str(e)}), 401
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/schedule")
+def api_schedule():
+    import datetime
+    today = datetime.date.today()
+    start = today.isoformat()
+    end   = (today + datetime.timedelta(days=6)).isoformat()
+    try:
+        resp = http.get(
+            "https://statsapi.mlb.com/api/v1/schedule",
+            params={"sportId": 1, "startDate": start, "endDate": end,
+                    "hydrate": "probablePitcher,team"},
+            timeout=(5, 15))
+        resp.raise_for_status()
+        raw = resp.json()
+    except Exception as e:
+        return jsonify({"error": f"MLB API 請求失敗: {e}"}), 502
+
+    days = []
+    for date_obj in raw.get("dates", []):
+        games = []
+        for g in date_obj.get("games", []):
+            teams = g.get("teams", {})
+
+            def _pitcher(side):
+                pp = side.get("probablePitcher") or {}
+                return {"name": pp.get("fullName", ""), "id": pp.get("id")} if pp else None
+
+            away = teams.get("away", {})
+            home = teams.get("home", {})
+            games.append({
+                "away_team":    away.get("team", {}).get("abbreviation", ""),
+                "home_team":    home.get("team", {}).get("abbreviation", ""),
+                "away_pitcher": _pitcher(away),
+                "home_pitcher": _pitcher(home),
+                "status":       g.get("status", {}).get("detailedState", ""),
+                "game_time":    g.get("gameDate", ""),
+            })
+        days.append({"date": date_obj["date"], "games": games})
+
+    return jsonify({"days": days, "start": start, "end": end})
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
