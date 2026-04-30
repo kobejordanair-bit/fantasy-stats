@@ -425,17 +425,53 @@ def compare_stats(give_stats, get_stats, cats, negative_cats, label_give, label_
     return results, my_win, my_lose, tie
 
 
+_PITCHER_RATE_CATS = {"ERA", "WHIP", "K/9", "BB/9", "K/BB"}
+_BATTER_RATE_CATS  = {"AVG", "OBP", "SLG", "OPS"}
+
+
 def sum_stats(players_stats_dict, period):
-    """合計多位球員的統計數據（平均類別取最後一位球員的值）"""
+    """合計多位球員的統計數據。
+    計數類別直接加總；投手率類別（ERA、WHIP、K/9、BB/9、K/BB）依出賽局數（IP）
+    加權計算，確保多先發投手交易時數字正確；打者率類別取最後一位球員的值。"""
     totals = defaultdict(float)
+    # 計數類別全部加總（包含 IP）
     for pname, periods in players_stats_dict.items():
         for cat, val in periods.get(period, {}).items():
             if cat not in AVG_CATS:
                 totals[cat] += to_float(val)
+
+    # 打者率統計（AVG / OBP / SLG / OPS）：缺乏 AB/PA 加權基礎，取最後一位球員的值
     for pname, periods in players_stats_dict.items():
-        for cat in AVG_CATS:
+        for cat in _BATTER_RATE_CATS:
             if cat in periods.get(period, {}):
                 totals[cat] = to_float(periods[period][cat])
+
+    # 投手率統計：以 IP 加權，還原 ER 與 H+BB 後重算（多先發投手正確聚合）
+    total_ip = totals.get("IP", 0)
+    if total_ip > 0:
+        total_er = total_hbb = pitcher_k = pitcher_bb = 0.0
+        for pname, periods in players_stats_dict.items():
+            p  = periods.get(period, {})
+            ip = to_float(p.get("IP", 0))
+            if ip <= 0:
+                continue
+            total_er  += to_float(p.get("ERA",  0)) * ip / 9   # ER = ERA × IP / 9
+            total_hbb += to_float(p.get("WHIP", 0)) * ip       # H+BB = WHIP × IP
+            pitcher_k  += to_float(p.get("K",   0))
+            pitcher_bb += to_float(p.get("BB",  0))
+        totals["ERA"]  = round(total_er  / total_ip * 9, 3)
+        totals["WHIP"] = round(total_hbb / total_ip,    3)
+        totals["K/9"]  = round(pitcher_k  / total_ip * 9, 2)
+        totals["BB/9"] = round(pitcher_bb / total_ip * 9, 2)
+        if pitcher_bb > 0:
+            totals["K/BB"] = round(pitcher_k / pitcher_bb, 3)
+    else:
+        # 無 IP 資料（純打者組合）：沿用舊行為
+        for pname, periods in players_stats_dict.items():
+            for cat in _PITCHER_RATE_CATS:
+                if cat in periods.get(period, {}):
+                    totals[cat] = to_float(periods[period][cat])
+
     return dict(totals)
 
 
