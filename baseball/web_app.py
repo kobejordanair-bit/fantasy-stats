@@ -372,6 +372,8 @@ HTML = """<!DOCTYPE html>
   .sched-abbr { font-weight: 700; color: #cbd5e1; font-size: .8rem; min-width: 30px; }
   .sched-pitcher { font-size: .8rem; color: #e2e8f0; white-space: nowrap;
                    overflow: hidden; text-overflow: ellipsis; }
+  .sched-pitcher.mine { color: #4ade80; font-weight: 700; }
+  .sched-pitcher.mine::before { content: "★ "; font-size: .7rem; }
   .sched-tbd  { color: #475569; font-style: italic; }
   .sched-empty { padding: 16px 12px; font-size: .8rem; color: #475569; text-align: center; }
 </style>
@@ -528,10 +530,31 @@ async function loadSchedule(force) {
   loading.style.display = "flex";
   content.innerHTML = "";
   try {
-    const r = await fetch("/api/schedule");
-    const data = await r.json();
+    // 同時抓排程和自己的名單（若已選聯盟）
+    const lk = getLeagueKey();
+    const fetches = [fetch("/api/schedule")];
+    if (lk) fetches.push(fetch(`/api/my_roster?league_key=${encodeURIComponent(lk)}`));
+    const [schedRes, rosterRes] = await Promise.all(fetches);
+
+    const data = await schedRes.json();
     if (data.error) throw new Error(data.error);
-    renderSchedule(data);
+
+    // 建立自己名單投手的姓名 Set（全名 + 姓氏，normalize 方便比對）
+    const myPitchers = new Set();
+    if (rosterRes) {
+      const rData = await rosterRes.json();
+      const pitcherPos = new Set(["SP","RP","P"]);
+      for (const p of (rData.players || [])) {
+        const pos = (p.position || "").toUpperCase();
+        if ([...pitcherPos].some(pp => pos.includes(pp))) {
+          const norm = n => n.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"");
+          myPitchers.add(norm(p.name));
+          myPitchers.add(norm(p.name.split(" ").pop()));  // 姓氏
+        }
+      }
+    }
+
+    renderSchedule(data, myPitchers);
     _schedLoaded = true;
   } catch(e) {
     content.innerHTML = `<p style="color:#f87171">載入失敗：${e.message}</p>`;
@@ -540,11 +563,18 @@ async function loadSchedule(force) {
   }
 }
 
-function renderSchedule(data) {
+function renderSchedule(data, myPitchers = new Set()) {
   const today = new Date().toISOString().slice(0, 10);
   const days = data.days || [];
   const DAY_ZH = ["日","一","二","三","四","五","六"];
-  const MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const norm = n => n.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"");
+
+  function pitcherHtml(p) {
+    if (!p || !p.name) return '<span class="sched-tbd">TBD</span>';
+    const lastName = p.name.split(" ").pop();
+    const isMine = myPitchers.has(norm(p.name)) || myPitchers.has(norm(lastName));
+    return `<span class="sched-pitcher${isMine ? " mine" : ""}" title="${p.name}">${lastName}</span>`;
+  }
 
   let html = '<div class="sched-week">';
   for (const day of days) {
@@ -557,19 +587,15 @@ function renderSchedule(data) {
       html += `<div class="sched-empty">休息日</div>`;
     } else {
       for (const g of day.games) {
-        const ap = g.away_pitcher;
-        const hp = g.home_pitcher;
-        const apName = ap && ap.name ? ap.name.split(" ").pop() : null;
-        const hpName = hp && hp.name ? hp.name.split(" ").pop() : null;
         html += `<div class="sched-game">
           <div class="sched-matchup">
             <span class="sched-abbr">${g.away_team}</span>
             <span>@</span>
             <span class="sched-abbr">${g.home_team}</span>
           </div>
-          <div class="sched-pitcher">${apName ? apName : '<span class="sched-tbd">TBD</span>'}</div>
+          <div>${pitcherHtml(g.away_pitcher)}</div>
           <div style="font-size:.7rem;color:#475569;padding:1px 0">vs</div>
-          <div class="sched-pitcher">${hpName ? hpName : '<span class="sched-tbd">TBD</span>'}</div>
+          <div>${pitcherHtml(g.home_pitcher)}</div>
         </div>`;
       }
     }
