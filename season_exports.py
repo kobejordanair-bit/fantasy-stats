@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import html
 import json
+import math
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from fantasy_core import PAIRS, awards, validate_season
@@ -18,6 +20,26 @@ def source_note(season):
     warnings=season.get('quality',{}).get('warnings',[])
     if warnings: note+=' 提醒：'+('；'.join(warnings)[:500])+'（完整提醒見 season.json）'
     return note
+
+
+def source_note_height(note, column_widths, *, minimum=34, font_size=11):
+    """Estimate wrapped text height for the merged source row, in Excel points.
+
+    Excel does not auto-fit merged cells. Column widths are approximately seven
+    pixels per Calibri 11 digit plus five pixels padding. Reserve inner padding,
+    count CJK/full-width glyphs as one em, and allow an extra line for long notes.
+    This changes presentation only; the complete source-note string is retained.
+    """
+    available=max(1,sum(width*7+5 for width in column_widths)-12)
+    em=font_size*96/72
+    lines=0
+    for paragraph in note.replace('\r\n','\n').replace('\r','\n').split('\n'):
+        width=0
+        for char in paragraph:
+            if unicodedata.combining(char) or unicodedata.category(char)=='Cf': continue
+            width+=em*(2 if char=='\t' else 1 if unicodedata.east_asian_width(char) in {'W','F','A'} else .52)
+        lines+=max(1,math.ceil(width/available))
+    return min(409,max(minimum,(lines+(1 if lines>2 else 0))*font_size*1.3+8))
 
 
 def safe_csv(value):
@@ -97,7 +119,11 @@ def export_excel(season,out_dir):
                         if len(cell.value)==10:
                             cell.value=datetime.strptime(cell.value,'%Y-%m-%d');cell.number_format='yyyy-mm-dd'
                     except ValueError: pass
-        ws.row_dimensions[1].height=28;ws.row_dimensions[2].height=64 if season.get('quality',{}).get('warnings') else 34;ws.row_dimensions[3].height=32
+        ws.row_dimensions[1].height=28
+        ws.row_dimensions[2].height=source_note_height(
+            ws['A2'].value,[ws.column_dimensions[get_column_letter(col)].width for col in range(1,len(headers)+1)],
+            minimum=64 if season.get('quality',{}).get('warnings') else 34)
+        ws.row_dimensions[3].height=32
         ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=len(headers))
         ws.merge_cells(start_row=2,start_column=1,end_row=2,end_column=len(headers))
         ws.freeze_panes='F4';ws.auto_filter.ref=f'A3:{get_column_letter(len(headers))}{max(3,ws.max_row)}'
