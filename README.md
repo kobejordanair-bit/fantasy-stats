@@ -28,6 +28,14 @@ Copy-Item .env.example .env
 
 Token 預設存於家目錄 `.fantasy-stats/yahoo-token.json`，不放進此 repository。可在命令前使用 `--token-file` 指定其他本機路徑。不要提交 `.env`、token、`reports/` 或私有原始回應；Git 已排除預設位置。OAuth 使用隨機 state、完整 callback 核對、timeout、有限重試及 401 更新，不打印 API 回應內容或 token。
 
+由本機操作工具接收授權回傳時，可省去人工貼網址：
+
+```powershell
+.\.venv\Scripts\python.exe fetch_stats.py --env-file C:\private\yahoo.env login --no-browser --callback-file C:\private\new-random.callback --callback-timeout 1800
+```
+
+請使用 repository 外的私人目錄與全新的隨機檔名，啟動前該 callback 檔不得存在。操作工具在 Yahoo 重導後，把完整 callback URL 以 UTF-8 寫入同目錄暫存檔，再原子改名為指定檔；程式只接收一次，先移除檔案，再檢查 state、redirect、單一授權碼並交換 token。等待上限為 1800 秒，不需啟動 HTTPS 伺服器或更改憑證信任。網址與授權碼屬私有資料，不應寫入一般紀錄或提交 Git；逾時後應停止交付該檔並重新登入。
+
 ## 年度資料與報表
 
 每次執行都建立獨立目錄：
@@ -55,6 +63,14 @@ HTML 不載入 CDN、圖片、外部字型或第三方 JavaScript，不需登入
 ```powershell
 .\.venv\Scripts\python.exe fetch_stats.py export path\to\season.json
 ```
+
+長球季擷取若中斷，可由前次輸出目錄續跑，仍會產生新的年度快照：
+
+```powershell
+.\.venv\Scripts\python.exe fetch_stats.py collect --league 000.l.000 --team 000.l.000.t.1 --resume path\to\previous-run
+```
+
+只有經 SHA-256 驗證的成功 API 回應可重用；未取得的回應會重新擷取，損壞的快取或來源清單會停止，避免採信不一致的證據。續跑先驗證目前授權帳號與聯盟／球隊／球季，帳號不同或前次缺少身份綁定時會停止。原始快照保留，失效授權會立即中止，不會繼續用空資料完成球季。每次成功回應即寫入 `source-manifest.jsonl`，即使尚未產生 Excel 也可保留已完成的擷取證據。
 
 ## 統計口徑
 

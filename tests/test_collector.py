@@ -1,5 +1,6 @@
 """Synthetic fixtures only: these are not the user's league or championship results."""
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from fantasy_core import parse_stats, player_info, blank_season, validate_season, aggregate, awards, waiver_stints, player_totals
 from season_collector import Collector
-from yahoo_client import YahooError
+from yahoo_client import YahooError, YahooAuthError
 
 LEAGUE='999.l.1';TEAM=LEAGUE+'.t.1';OTHER=LEAGUE+'.t.2'
 
@@ -26,9 +27,10 @@ def player(pid,day,slot='PG',pts=10):
 
 
 class FakeClient:
-    def __init__(self): self.calls=[];self.fail_day=None;self.live=False;self.final_rank=1
+    def __init__(self): self.calls=[];self.fail_day=None;self.live=False;self.final_rank=1;self.guid='synthetic-account-1';self.auth_fail_day=None;self.invalid_day=None
     def get(self,path):
         self.calls.append(path)
+        if path=='/users;use_login=1': return {'fantasy_content':{'users':{'0':{'user':[{'guid':self.guid}]},'count':1}}}
         if path=='/league/'+LEAGUE:
             return {'fantasy_content':{'league':[{'league_key':LEAGUE,'name':'SYNTHETIC league','season':'2025','start_week':'1','end_week':'1','current_week':'1','is_finished':'1'}]}}
         if path=='/team/'+TEAM: return {'fantasy_content':{'team':[[{'team_key':TEAM},{'name':'SYNTHETIC team'}]]}}
@@ -43,7 +45,9 @@ class FakeClient:
                      'stat_winners':[{'stat_winner':{'stat_id':'12','winner_team_key':TEAM}},{'stat_winner':{'stat_id':'5','is_tied':'1'}}],'teams':teams}}]}}
         if '/roster;date=' in path:
             day=path.split('date=')[1][:10]
+            if day==self.auth_fail_day: raise YahooAuthError('synthetic auth unavailable')
             if day==self.fail_day: raise YahooError('synthetic unavailable')
+            if day==self.invalid_day: return {'fantasy_content':{'roster':{'coverage_type':'date','date':'1900-01-01','players':{}}}}
             return {'fantasy_content':{'roster':{'coverage_type':'date','date':day,'players':{'0':{'player':player('1',day)},'1':{'player':player('2',day,'BN',999)},'count':2}}}}
         if '/transactions;' in path:
             def tx_player(pid,src,dst):
@@ -152,5 +156,137 @@ class CollectorTests(unittest.TestCase):
         p={'id':'1','name':'A'};event={'type':'add','date':'2025-10-19','received':[p],'sent':[]}
         rows=[{'playerId':'1','date':'2025-10-20','week':1,'stats':{'PTS':10}}]
         self.assertIsNone(waiver_stints([event],rows,['PTS'],[(1,'2025-10-21')])[0]['stats']['PTS'])
+
+    def new_collector(self,client,path,**kwargs):
+        return Collector(client,path,today=date(2025,11,1),progress=lambda _:None,**kwargs)
+
+    def test_resume_repairs_partial_day_without_changing_old_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old=Path(tmp)/'old';new=Path(tmp)/'new'
+            client=FakeClient();client.fail_day='2025-10-21'
+            partial=self.new_collector(client,old).collect(LEAGUE,TEAM)
+            before={p.relative_to(old):p.read_bytes() for p in old.rglob('*') if p.is_file()}
+            current=FakeClient();season=self.new_collector(current,new,resume_from=old).collect(LEAGUE,TEAM)
+            self.assertEqual(partial['quality']['missingWeeks'],[1])
+            self.assertEqual(season['quality']['missingWeeks'],[])
+            self.assertEqual(season['players'][0]['stats']['PTS'],30)
+            calls=[p for p in current.calls if '/roster;date=' in p]
+            self.assertEqual(len(calls),1);self.assertIn('date=2025-10-21',calls[0])
+            self.assertFalse(any('/scoreboard;' in p or p.startswith('/player/') for p in current.calls))
+            self.assertIn('/users;use_login=1',current.calls)
+            self.assertIn('/league/'+LEAGUE+'/settings',current.calls)
+            self.assertIn('/game/999/game_weeks',current.calls)
+            self.assertEqual(before,{p.relative_to(old):p.read_bytes() for p in old.rglob('*') if p.is_file()})
+            manifest=json.loads((new/'source-manifest.json').read_text(encoding='utf-8'))
+            for entry in manifest['requests']:
+                content=(new/entry['file']).read_bytes()
+                self.assertEqual(hashlib.sha256(content).hexdigest(),entry['sha256'])
+                self.assertTrue(Path(entry['file']).name.startswith(hashlib.sha256(entry['path'].encode()).hexdigest()+'-'))
+
+    def test_fatal_auth_stops_immediately_and_interrupted_run_can_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old=Path(tmp)/'old';client=FakeClient();client.auth_fail_day='2025-10-21'
+            with self.assertRaises(YahooAuthError): self.new_collector(client,old).collect(LEAGUE,TEAM)
+            self.assertFalse(any('date=2025-10-22' in p for p in client.calls))
+            self.assertTrue((old/'source-manifest.jsonl').is_file())
+            self.assertFalse((old/'source-manifest.json').exists())
+            current=FakeClient();season=self.new_collector(current,Path(tmp)/'new',resume_from=old).collect(LEAGUE,TEAM)
+            self.assertEqual(season['players'][0]['stats']['PTS'],30)
+            self.assertFalse(any('roster;date=2025-10-20' in p for p in current.calls))
+
+    def test_resume_rejects_wrong_identity_and_legacy_unbound_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old=Path(tmp)/'old';self.new_collector(FakeClient(),old).collect(LEAGUE,TEAM)
+            other=FakeClient();other.guid='synthetic-different-account'
+            with self.assertRaisesRegex(ValueError,'帳號'):
+                self.new_collector(other,Path(tmp)/'other',resume_from=old).collect(LEAGUE,TEAM)
+            self.assertFalse(any('roster;' in p for p in other.calls))
+            with self.assertRaisesRegex(ValueError,'時區'):
+                self.new_collector(FakeClient(),Path(tmp)/'zone',resume_from=old,timezone_name='UTC').collect(LEAGUE,TEAM)
+            journal=old/'source-manifest.jsonl';original=journal.read_text(encoding='utf-8')
+            for field,value in [('leagueKey','999.l.2'),('teamKey',OTHER),('season',2024)]:
+                lines=original.splitlines();header=json.loads(lines[0]);header['identity'][field]=value
+                lines[0]=json.dumps(header);journal.write_text('\n'.join(lines)+'\n',encoding='utf-8')
+                with self.assertRaisesRegex(ValueError,'球季'):
+                    self.new_collector(FakeClient(),Path(tmp)/field,resume_from=old).collect(LEAGUE,TEAM)
+            journal.unlink()
+            with self.assertRaisesRegex(ValueError,'可驗證帳號'):
+                self.new_collector(FakeClient(),Path(tmp)/'legacy',resume_from=old).collect(LEAGUE,TEAM)
+
+    def test_resume_validates_digest_and_path_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old=Path(tmp)/'old';self.new_collector(FakeClient(),old).collect(LEAGUE,TEAM)
+            journal=old/'source-manifest.jsonl';original=journal.read_text(encoding='utf-8')
+            entries=[json.loads(line) for line in original.splitlines()]
+            cached=next(e for e in entries if '/roster;date=' in e.get('path',''))
+            raw=old/cached['file'];content=raw.read_bytes();raw.write_bytes(content+b' ')
+            with self.assertRaisesRegex(ValueError,'SHA-256'):
+                self.new_collector(FakeClient(),Path(tmp)/'digest',resume_from=old).collect(LEAGUE,TEAM)
+            raw.write_bytes(content)
+            cached['file']='../outside.json'
+            journal.write_text('\n'.join(json.dumps(e) for e in entries)+'\n',encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'API path'):
+                self.new_collector(FakeClient(),Path(tmp)/'path',resume_from=old).collect(LEAGUE,TEAM)
+
+    def test_semantically_invalid_cached_day_is_refetched_and_live_scores_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old=Path(tmp)/'old';client=FakeClient();client.invalid_day='2025-10-21';client.live=True
+            partial=self.new_collector(client,old).collect(LEAGUE,TEAM)
+            current=FakeClient();season=self.new_collector(current,Path(tmp)/'new',resume_from=old).collect(LEAGUE,TEAM)
+            self.assertEqual(partial['quality']['missingWeeks'],[1])
+            self.assertEqual(season['quality']['missingWeeks'],[])
+            self.assertEqual(season['matchups'][0]['status'],'final')
+            self.assertTrue(any('roster;date=2025-10-21' in p for p in current.calls))
+            self.assertTrue(any('/scoreboard;' in p for p in current.calls))
+
+    def test_truncated_final_journal_record_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old=Path(tmp)/'old';self.new_collector(FakeClient(),old).collect(LEAGUE,TEAM)
+            with (old/'source-manifest.jsonl').open('ab') as stream: stream.write(b'{"kind":"response","path":')
+            season=self.new_collector(FakeClient(),Path(tmp)/'new',resume_from=old).collect(LEAGUE,TEAM)
+            self.assertEqual(season['players'][0]['stats']['PTS'],30)
+            self.assertTrue(any('最後一筆' in warning for warning in season['quality']['warnings']))
+
+    def test_resume_rejects_invalid_json_error_responses_and_unknown_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old=Path(tmp)/'old';self.new_collector(FakeClient(),old).collect(LEAGUE,TEAM)
+            journal=old/'source-manifest.jsonl';original=journal.read_text(encoding='utf-8')
+            for label,content in [('invalid',b'{bad-json'),('error',b'{"error":{"description":"synthetic"}}')]:
+                entries=[json.loads(line) for line in original.splitlines()]
+                row=next(e for e in entries if '/roster;date=' in e.get('path',''))
+                digest=hashlib.sha256(content).hexdigest()
+                row['sha256']=digest
+                row['file']='raw/'+hashlib.sha256(row['path'].encode()).hexdigest()+'-'+digest+'.json'
+                (old/row['file']).write_bytes(content)
+                journal.write_text('\n'.join(json.dumps(e) for e in entries)+'\n',encoding='utf-8')
+                with self.assertRaises(ValueError):
+                    self.new_collector(FakeClient(),Path(tmp)/label,resume_from=old).collect(LEAGUE,TEAM)
+            journal.write_text(original+json.dumps({'kind':'unknown','path':'/anything'})+'\n',encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'未知'):
+                self.new_collector(FakeClient(),Path(tmp)/'unknown',resume_from=old).collect(LEAGUE,TEAM)
+
+    def test_absent_account_identity_cannot_use_cache_and_same_run_cannot_be_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old=Path(tmp)/'old';self.new_collector(FakeClient(),old).collect(LEAGUE,TEAM)
+            client=FakeClient();client.guid=''
+            with self.assertRaises(YahooAuthError):
+                self.new_collector(client,Path(tmp)/'new',resume_from=old).collect(LEAGUE,TEAM)
+            self.assertFalse(any('/roster;' in path for path in client.calls))
+            with self.assertRaisesRegex(ValueError,'不可覆寫'):
+                self.new_collector(FakeClient(),old,resume_from=old)
+
+    def test_calendar_historical_dates_are_authoritative_and_missing_week_fails(self):
+        class BrokenCalendar(FakeClient):
+            def get(self,path):
+                response=super().get(path)
+                if path=='/league/'+LEAGUE:
+                    response['fantasy_content']['league'][0].update(end_week='2',current_week='2')
+                return response
+        with tempfile.TemporaryDirectory() as tmp:
+            client=BrokenCalendar()
+            with self.assertRaisesRegex(YahooError,'日曆缺漏'):
+                self.new_collector(client,tmp).collect(LEAGUE,TEAM)
+            self.assertIn('/game/999/game_weeks',client.calls)
+            self.assertFalse(any('roster;' in p for p in client.calls))
 
 if __name__=='__main__':unittest.main()
