@@ -93,7 +93,7 @@ async function harness(t,options={}) {
       assert.equal(await readFile(finalTokenFile,'utf8'),originalToken,'Ownership must be checked before replacing the existing token');
       events.push('ownership');
       if(options.abortDuringOwnership)controller.abort();
-      if(options.ownerStatus)return Response.json({},{status:options.ownerStatus});
+      if(options.ownerStatus)return Response.json(options.ownerBody??{},{status:options.ownerStatus});
       if(options.oversizedOwner)return new Response(' '.repeat(2*1024*1024+1));
       return Response.json(options.ownerPayload??ownedPayload());
     }
@@ -188,6 +188,26 @@ test('wrong account, ownership redirect and oversized response preserve the exis
     assert.equal(JSON.stringify(h.output).includes('TOKEN'),false);
     assert.equal(error.message.includes('SYNTHETIC_NEW_TOKEN'),false);
   });
+});
+
+test('Yahoo API 403 distinguishes completed OAuth from unconfirmed API access without promoting or exposing the response',async t=>{
+  const h=await harness(t,{ownerStatus:403,ownerBody:{error:{description:'This application is not authorized to perform this action.',detail:'SYNTHETIC_PRIVATE_API_DETAIL'}}});
+  let error;
+  await assert.rejects(h.run(),caught=>{error=caught;return caught instanceof PhoneAuthError;});
+  assert.match(error.message,/登入及 token 交換已成功/);
+  assert.match(error.message,/Fantasy API 拒絕存取（HTTP 403）/);
+  assert.match(error.message,/先核對同一 App 目前的權限及開通狀態/);
+  assert.match(error.message,/若沒有可用 App，再依 Yahoo 流程申請/);
+  assert.match(error.message,/403 原因尚未確定/);
+  assert.match(error.message,/球隊持有資格尚未驗證/);
+  assert.equal(await readFile(h.finalTokenFile,'utf8'),h.originalToken);
+  assert.ok(error.stagedTokenFile);assert.equal(error.tokenPromoted,undefined);
+  assert.equal(JSON.parse(await readFile(error.stagedTokenFile,'utf8')).access_token,'SYNTHETIC_NEW_TOKEN');
+  assert.equal(h.spawnCalls.length,1,'An API access denial must not restart Yahoo consent');
+  assert.equal(h.events.filter(event=>event==='ownership').length,1);
+  assert.equal(h.requests.some(r=>r.route.endsWith('/finish')),false);
+  assert.deepEqual(h.output,[SITE_ORIGIN+'/yahoo/connect/'+id]);
+  for(const secret of ['SYNTHETIC_PRIVATE_API_DETAIL','SYNTHETIC_NEW_TOKEN','SYNTHETIC_PRIVATE_CODE'])assert.equal(error.message.includes(secret),false);
 });
 
 test('finish can be retried after durable promotion without reusing or reprinting authorization',async t=>{

@@ -142,7 +142,11 @@ async function verifyStagedOwner(stagedTokenFile,teamKey,fetchFn,signal) {
     const url='https://fantasysports.yahooapis.com/fantasy/v2/users;use_login=1/games;game_keys='+teamKey.split('.')[0]+'/teams?format=json';
     const response=await fetchFn(url,{method:'GET',redirect:'manual',cache:'no-store',headers:{Authorization:'Bearer '+token.access_token},
       signal:signal?AbortSignal.any([signal,AbortSignal.timeout(20000)]):AbortSignal.timeout(20000)});
-    if(response.status!==200){await response.body?.cancel();fail('Yahoo 無法確認此登入者持有指定球隊；既有 token 未變更。');}
+    if(response.status!==200){
+      await response.body?.cancel();
+      if(response.status===403)fail('Yahoo 登入及 token 交換已成功，但 Fantasy API 拒絕存取（HTTP 403）。請先核對同一 App 目前的權限及開通狀態；若沒有可用 App，再依 Yahoo 流程申請。403 原因尚未確定，請勿盲改 scope 或反覆授權。球隊持有資格尚未驗證，既有正式 token 未變更。');
+      fail('Yahoo 無法確認此登入者持有指定球隊；既有 token 未變更。');
+    }
     const payload=await jsonBody(response,2*1024*1024);
     if(!ownsExpectedTeam(payload,teamKey))fail('此次 Yahoo 帳號未通過指定球隊驗證；既有 token 未變更。');
   } catch(error) {if(error instanceof PhoneAuthError)throw error;fail('Yahoo 球隊所有權驗證未完成；既有 token 未變更。');}
