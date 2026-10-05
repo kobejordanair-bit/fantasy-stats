@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from fantasy_core import blank_season
 from season_exports import export_all, safe_csv, SHEETS
-from season_exports import source_note
+from season_exports import source_note, source_note_height
 from fetch_stats import new_run
 
 
@@ -58,5 +58,58 @@ class ExportTests(unittest.TestCase):
         note=source_note(s)
         self.assertIn('manual',note);self.assertIn('roster-week',note)
         self.assertNotIn('官方',note);self.assertNotIn('已驗證',note)
+
+    def test_source_note_preserves_long_warnings_and_season_notes(self):
+        s=fixture()
+        warning='Missing evidence remains unknown. '*40+'warning-end'
+        notes='Annual source context. '*40+'notes-end'
+        s['quality']['warnings']=[warning]
+        s['notes']=notes
+        note=source_note(s)
+        self.assertIn(warning,note)
+        self.assertIn(notes,note)
+        self.assertGreater(len(note),1000)
+
+    def test_merged_source_note_fits_chinese_warnings_without_changing_workbook_data(self):
+        from openpyxl import load_workbook
+        short=fixture();short['quality']['warnings']=[]
+        long=fixture();warning='尚未取得每日球員資料，請保留未知數值。'*18+'\n這是提醒文字末尾。'
+        long['quality']['warnings']=[warning]
+        with tempfile.TemporaryDirectory() as tmp:
+            short_dir=Path(tmp)/'short';long_dir=Path(tmp)/'long'
+            export_all(short,short_dir);export_all(long,long_dir)
+            short_book=load_workbook(short_dir/'fantasy_season.xlsx')
+            long_book=load_workbook(long_dir/'fantasy_season.xlsx')
+            try:
+                self.assertEqual(short_book.sheetnames,SHEETS)
+                self.assertEqual(long_book.sheetnames,SHEETS)
+                for a,b in zip(short_book,long_book):
+                    self.assertEqual(a['A2'].value,source_note(short))
+                    self.assertEqual(b['A2'].value,source_note(long))
+                    self.assertIn(warning,b['A2'].value)
+                    self.assertLessEqual(a.row_dimensions[2].height,40)
+                    self.assertLessEqual(b.row_dimensions[2].height,409)
+                    self.assertEqual(a.freeze_panes,b.freeze_panes)
+                    self.assertEqual(a.auto_filter.ref,b.auto_filter.ref)
+                    self.assertEqual(a.print_title_rows,b.print_title_rows)
+                    self.assertEqual(str(a.merged_cells),str(b.merged_cells))
+                    self.assertEqual(a.max_column,b.max_column)
+                    for col in a.column_dimensions:
+                        self.assertEqual(a.column_dimensions[col].width,b.column_dimensions[col].width)
+                    for row in a:
+                        for cell in row:
+                            other=b[cell.coordinate]
+                            if cell.coordinate!='A2': self.assertEqual(cell.value,other.value)
+                            self.assertEqual(cell.data_type,other.data_type)
+                            self.assertEqual(cell.number_format,other.number_format)
+                narrow=long_book['類別戰績'].row_dimensions[2].height
+                self.assertGreater(narrow,140)  # The old fixed 64 pt clipped this note.
+                self.assertGreater(narrow,long_book['球員季總'].row_dimensions[2].height)
+                ws=long_book[SHEETS[0]];headers=[cell.value for cell in ws[3]]
+                pct=ws.cell(4,headers.index('FG%')+1)
+                self.assertEqual((pct.value,pct.data_type,pct.number_format),(.5,'n','0.0%'))
+            finally:
+                short_book.close();long_book.close()
+        self.assertEqual(source_note_height('中'*10000,[15]),409)
 
 if __name__=='__main__':unittest.main()

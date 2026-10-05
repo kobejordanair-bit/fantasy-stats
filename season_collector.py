@@ -6,11 +6,12 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import hashlib
 import json
+import os
 import re
 from fantasy_core import (ALIASES, PAIRS, attributes, resources, first, number, parse_stats,
                           player_info, blank_season, player_week_rows, player_totals,
                           waiver_stints, aggregate, event_date, validate_season)
-from yahoo_client import YahooError
+from yahoo_client import YahooError, YahooAuthError
 
 NEGATIVE={'TO','PF','TECH','FF'}
 
@@ -29,23 +30,135 @@ def dates_between(start,end):
 
 
 class Collector:
-    def __init__(self, client, run_dir, *, timezone_name='America/Los_Angeles', today=None, progress=print):
-        self.client=client;self.run_dir=Path(run_dir);self.raw=self.run_dir/'raw'
+    def __init__(self, client, run_dir, *, timezone_name='America/Los_Angeles', today=None, progress=print, resume_from=None):
+        self.client=client;self.run_dir=Path(run_dir).resolve();self.raw=self.run_dir/'raw'
+        self.resume_from=Path(resume_from).expanduser().resolve() if resume_from else None
+        if self.resume_from==self.run_dir: raise ValueError('續跑必須另建新資料夾，原始證據不可覆寫。')
         self.raw.mkdir(parents=True,exist_ok=True)
         self.timezone_name=timezone_name;self.today=today or datetime.now(ZoneInfo(timezone_name)).date()
         self.progress=progress;self.cache={};self.manifest=[];self.warnings=[]
+        self.identity=None;self.resume_entries={};self.rejected=set();self.failures=[]
+        self.journal=self.run_dir/'source-manifest.jsonl'
 
     def warn(self,message):
         if message not in self.warnings: self.warnings.append(message)
 
-    def get(self,path):
-        if path in self.cache: return self.cache[path]
-        data=self.client.get(path)
+    @staticmethod
+    def _stamp():
+        return datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
+
+    @staticmethod
+    def _json_response(data):
+        if not isinstance(data,dict) or not isinstance(data.get('fantasy_content'),(dict,list)) or 'error' in data:
+            raise YahooError('Yahoo API 回應缺少有效 fantasy_content。')
+        return data
+
+    def _append(self,event,*,create=False):
+        # The append-only journal is the durable index, including an interrupted run.
+        with self.journal.open('x' if create else 'a',encoding='utf-8',newline='\n') as stream:
+            stream.write(json.dumps(event,ensure_ascii=False,allow_nan=False,separators=(',',':'))+'\n')
+            stream.flush();os.fsync(stream.fileno())
+
+    def _begin(self,league_key,team_key,metadata):
+        # Never authenticate from cached profile/league data. A token for another
+        # account must not gain access to a previous account's collection cache.
+        profile=self._json_response(self.client.get('/users;use_login=1'))
+        users=list(resources(profile,'user'))
+        guid=attributes(users[0]).get('guid') if len(users)==1 else None
+        if not isinstance(guid,str) or not guid.strip():
+            raise YahooAuthError('無法驗證目前 Yahoo 帳號；停止，未復用任何快取。')
+        self.identity={'leagueKey':league_key,'teamKey':team_key,'season':int(metadata['season']),
+                       'accountSha256':hashlib.sha256(('yahoo-guid:'+guid).encode()).hexdigest(),
+                       'timezone':self.timezone_name}
+        self._append({'kind':'header','schemaVersion':1,'provider':'Yahoo Fantasy Sports API',
+                      'identity':self.identity,'createdAt':self._stamp()},create=True)
+        if self.resume_from: self._load_resume()
+
+    def _load_resume(self):
+        journal=(self.resume_from/'source-manifest.jsonl').resolve()
+        if not journal.is_relative_to(self.resume_from): raise ValueError('續跑日誌超出來源資料夾。')
+        if not journal.is_file():
+            raise ValueError('舊資料夾缺少可驗證帳號的續跑日誌；請保留舊資料並重新擷取。')
+        if journal.stat().st_size>30_000_000: raise ValueError('續跑日誌過大。')
+        content=journal.read_bytes();lines=content.splitlines(keepends=True)
+        if not lines or len(lines)>100000: raise ValueError('續跑日誌格式不正確。')
+        # A process/power interruption may leave the last append unfinished. Its
+        # raw response is not indexed as successful and will be fetched again.
+        if not lines[-1].endswith(b'\n'):
+            lines.pop();self.warn('續跑來源最後一筆日誌未完成；該筆將重新擷取。')
+        try: events=[json.loads(line) for line in lines]
+        except (ValueError,UnicodeError): raise ValueError('續跑日誌損毀，未復用任何資料。') from None
+        if not events or not isinstance(events[0],dict) or events[0].get('kind')!='header' or events[0].get('schemaVersion')!=1:
+            raise ValueError('不支援的續跑日誌版本。')
+        if events[0].get('identity')!=self.identity:
+            raise ValueError('續跑來源的 Yahoo 帳號、聯盟、隊伍、球季或時區不符。')
+        entries={}
+        for event in events[1:]:
+            if not isinstance(event,dict): raise ValueError('續跑日誌紀錄格式不正確。')
+            path=event.get('path')
+            if not isinstance(path,str) or not path.startswith('/') or len(path)>4096 or any(x in path for x in ['://','?','#','\n','\r']):
+                raise ValueError('續跑 API path 格式不正確。')
+            if event.get('kind')=='response':
+                digest=event.get('sha256','')
+                if not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest):
+                    raise ValueError('續跑原始檔雜湊格式不正確。')
+                expected='raw/'+hashlib.sha256(path.encode()).hexdigest()+'-'+digest+'.json'
+                if event.get('file')!=expected: raise ValueError('續跑原始檔與 API path 不符。')
+                entries[path]=event
+            elif event.get('kind') in {'rejected','failure'}: entries.pop(path,None)
+            else: raise ValueError('未知的續跑日誌事件。')
+        self.resume_entries=entries
+
+    def _cached_response(self,path):
+        event=self.resume_entries.get(path)
+        if not event: return None
+        source=(self.resume_from/event['file']).resolve()
+        if not source.is_relative_to(self.resume_from): raise ValueError('續跑原始檔超出來源資料夾。')
+        if not source.is_file() or source.stat().st_size>30_000_000:
+            raise ValueError('續跑原始檔缺少或過大。')
+        content=source.read_bytes()
+        if hashlib.sha256(content).hexdigest()!=event['sha256']:
+            raise ValueError('續跑原始檔 SHA-256 不符，未使用損毀資料。')
+        try: data=json.loads(content)
+        except (ValueError,UnicodeError): raise ValueError('續跑原始檔不是有效 JSON。') from None
+        try: self._json_response(data)
+        except YahooError: raise ValueError('續跑原始檔不是成功的 Yahoo 回應。') from None
+        self._remember(path,data,reused=event)
+        return data
+
+    def _remember(self,path,data,*,reused=None):
+        self._json_response(data)
         content=json.dumps(data,ensure_ascii=False,allow_nan=False,separators=(',',':')).encode()
-        name=hashlib.sha256(path.encode()).hexdigest()+'.json'
-        (self.raw/name).write_bytes(content)
-        self.manifest.append({'path':path,'file':'raw/'+name,'sha256':hashlib.sha256(content).hexdigest()})
+        digest=hashlib.sha256(content).hexdigest()
+        name=hashlib.sha256(path.encode()).hexdigest()+'-'+digest+'.json'
+        destination=self.raw/name
+        if destination.exists():
+            if destination.read_bytes()!=content: raise ValueError('原始證據檔已存在但內容不符，禁止覆寫。')
+        else:
+            with destination.open('xb') as stream:
+                stream.write(content);stream.flush();os.fsync(stream.fileno())
+        event={'kind':'response','path':path,'file':'raw/'+name,'sha256':digest,
+               'capturedAt':reused.get('capturedAt') if reused else self._stamp(),'recordedAt':self._stamp()}
+        if reused: event['reusedSha256']=reused['sha256']
+        self._append(event)
+        self.manifest.append(event);self.rejected.discard(path)
         self.cache[path]=data
+
+    def reject(self,path,reason):
+        self.cache.pop(path,None);self.resume_entries.pop(path,None);self.rejected.add(path)
+        self._append({'kind':'rejected','path':path,'reason':reason,'recordedAt':self._stamp()})
+
+    def get(self,path,*,fresh=False):
+        if not fresh and path in self.cache: return self.cache[path]
+        if not fresh:
+            saved=self._cached_response(path)
+            if saved is not None: return saved
+        try: data=self._json_response(self.client.get(path))
+        except YahooError as error:
+            event={'kind':'failure','path':path,'errorType':type(error).__name__,'recordedAt':self._stamp()}
+            self.failures.append(event);self._append(event)
+            raise
+        self._remember(path,data)
         return data
 
     def discover(self):
@@ -70,7 +183,7 @@ class Collector:
         return mapping,cats
 
     def calendar(self,game_key,start,end):
-        data=self.get('/game/'+game_key+'/game_weeks')
+        data=self.get('/game/'+game_key+'/game_weeks',fresh=True)
         weeks=[]
         for r in resources(data,'game_week'):
             a=attributes(r)
@@ -88,10 +201,12 @@ class Collector:
         return weeks
 
     def scoreboard(self,league_key,team_key,week,mapping,categories):
-        data=self.get(f'/league/{league_key}/scoreboard;week={week}')
+        path=f'/league/{league_key}/scoreboard;week={week}'
+        data=self.get(path)
         for m in resources(data,'matchup'):
             if not isinstance(m,dict): continue
             if m.get('week') is not None and str(m['week'])!=str(week):
+                self.reject(path,'scoreboard-week-mismatch')
                 raise YahooError('Yahoo 比分板週次不符。')
             teams=[]
             for team in resources(m,'team'):
@@ -116,14 +231,24 @@ class Collector:
                     elif row.get('winner_team_key')==team_key: category_results[key]='W'
                     elif other and row.get('winner_team_key')==other['key']: category_results[key]='L'
             count=Counter(category_results.values());complete=len(category_results)==len(categories)
+            if status!='final' or not mine['stats']:
+                self.reject(path,'scoreboard-not-final-or-missing-stats')
             return {'week':week,'opponent':other['name'] if other else '', 'status':status,'phase':phase,'result':result,
                     'categoryWins':count['W'] if complete else None,'categoryLosses':count['L'] if complete else None,
                     'categoryTies':count['T'] if complete else None,'stats':mine['stats'],
                     'opponentStats':other['stats'] if other else {},'categoryResults':category_results}
+        self.reject(path,'scoreboard-no-matchup')
         return None
 
     def daily_lineup(self,team_key,week,day,mapping):
-        data=self.get(f'/team/{team_key}/roster;date={day}/players/stats;type=date;date={day}')
+        path=f'/team/{team_key}/roster;date={day}/players/stats;type=date;date={day}'
+        data=self.get(path)
+        try: return self._daily_rows(data,week,day,mapping)
+        except YahooError:
+            self.reject(path,'daily-coverage-or-roster-invalid')
+            raise
+
+    def _daily_rows(self,data,week,day,mapping):
         roster=first(data,'roster',{})
         coverage=first(roster,'coverage_type');actual_date=first(roster,'date')
         if coverage!='date' or str(actual_date)!=day:
@@ -151,7 +276,7 @@ class Collector:
     def transactions(self,league_key,team_key):
         # Yahoo documents this collection as all completed transactions. `start`
         # is not a documented transaction filter, so do not guess player pagination.
-        data=self.get(f'/league/{league_key}/transactions;team_key={team_key}')
+        data=self.get(f'/league/{league_key}/transactions;team_key={team_key}',fresh=True)
         container=first(data,'transactions')
         if container is None: raise YahooError('Yahoo 異動紀錄缺少 transactions。')
         batch=list(resources(container,'transaction'))
@@ -194,19 +319,25 @@ class Collector:
         results=[];keys=[c['key'] for c in categories]
         eligible=[(w['week'],day) for w in calendar for day in dates_between(w['startDate'],w['endDate'])
                   if date.fromisoformat(w['endDate'])<self.today]
-        for event in events:
-            if event['type']!='trade': continue
+        trades=[event for event in events if event['type']=='trade']
+        for index,event in enumerate(trades,1):
             start=event_date(event['date'],self.timezone_name)
             period=[(week,day) for week,day in eligible if day>start]
+            self.progress(f'交易 {index}/{len(trades)}：雙方 {len(event["received"])+len(event["sent"])} 位球員，同期 {len(period)} 天（已驗證快取可重用）')
             totals=[]
             for side in ['received','sent']:
                 samples=[]
                 for p in event[side]:
                     if not re.fullmatch(r'\d+\.p\.\d+',p['id']): raise YahooError('交易球員 key 格式不正確。')
                     for week,day in period:
+                        path=f'/player/{p["id"]}/stats;type=date;date={day}'
                         try:
-                            data=self.get(f'/player/{p["id"]}/stats;type=date;date={day}')
+                            data=self.get(path)
                             value=parse_stats(data,mapping,coverage='date',period=day)
+                            if not value:
+                                self.reject(path,'player-stats-date-or-coverage-invalid')
+                                raise YahooError('交易比較當日統計缺漏或日期不符。')
+                        except YahooAuthError: raise
                         except YahooError:
                             value={};self.warn('交易比較部分每日 NBA 資料缺漏；受影響類別維持未知。')
                         samples.append(value)
@@ -228,14 +359,18 @@ class Collector:
     def collect(self,league_key,team_key,*,include_trades=True):
         key_checked(league_key,'league');key_checked(team_key,'team')
         if not team_key.startswith(league_key+'.t.'): raise ValueError('隊伍不屬於指定聯盟')
-        metadata=attributes(first(self.get('/league/'+league_key),'league',{}))
+        metadata_response=self._json_response(self.client.get('/league/'+league_key))
+        metadata=attributes(first(metadata_response,'league',{}))
+        if metadata.get('league_key')!=league_key: raise YahooError('Yahoo 聯盟資料不符。')
         if metadata.get('game_code') not in {None,'nba'}: raise ValueError('只支援 NBA')
         year=int(metadata['season']);start=int(metadata['start_week']);end=int(metadata['end_week'])
         current=int(metadata.get('current_week') or end);end=min(end,current)
         if not 1<=start<=end<=60: raise YahooError('Yahoo 尚無可擷取的週次。')
-        team=attributes(first(self.get('/team/'+team_key),'team',{}))
+        self._begin(league_key,team_key,metadata)
+        self._remember('/league/'+league_key,metadata_response)
+        team=attributes(first(self.get('/team/'+team_key,fresh=True),'team',{}))
         if team.get('team_key')!=team_key or not team.get('name'): raise YahooError('Yahoo 球隊資料不符。')
-        settings=self.get('/league/'+league_key+'/settings');mapping,categories=self.categories(settings)
+        settings=self.get('/league/'+league_key+'/settings',fresh=True);mapping,categories=self.categories(settings)
         calendar=self.calendar(league_key.split('.')[0],start,end)
         season=blank_season(year,team['name']);season.update(leagueName=metadata.get('name',''),leagueKey=league_key,teamKey=team_key,categories=categories)
         keys=[c['key'] for c in categories];daily=[];missing=[];missing_weeks=[]
@@ -251,10 +386,11 @@ class Collector:
                         self.warn('部分官方球隊統計缺漏或覆蓋日期不符；保留官方勝負但不猜測數值。')
                 else:
                     # Bye weeks have team statistics but no fabricated matchup or final status.
-                    data=self.get(f'/team/{team_key}/stats;type=week;week={week}')
+                    data=self.get(f'/team/{team_key}/stats;type=week;week={week}',fresh=True)
                     stats=parse_stats(data,mapping,coverage='week',period=week,block='team_stats')
                     season['teamWeeks'].append({**w,'status':'unknown','phase':'unknown','stats':stats})
                     self.warn('無對戰或輪空週保留官方隊伍統計，但不自行判定結算。')
+            except YahooAuthError: raise
             except YahooError:
                 missing_weeks.append(week)
                 season['teamWeeks'].append({**w,'status':'unknown','phase':'unknown','stats':{}})
@@ -263,6 +399,7 @@ class Collector:
                 self.warn('進行中週次保留官方比分狀態；球員貢獻與交易比較只含已完整結束的週次。');continue
             for day in dates_between(w['startDate'],w['endDate']):
                 try: daily.extend(self.daily_lineup(team_key,week,day,mapping))
+                except YahooAuthError: raise
                 except YahooError: missing.append((week,day))
         # Preserve bench-only players in the roster. A verified bench slot contributes
         # exactly zero fantasy counts, irrespective of the player's NBA box score.
@@ -272,6 +409,7 @@ class Collector:
         season['playerWeeks']=player_week_rows(contributions,keys,missing)
         season['players']=player_totals(season['playerWeeks'],keys)
         try: season['transactions']=self.transactions(league_key,team_key)
+        except YahooAuthError: raise
         except YahooError:
             self.warn('異動紀錄擷取失敗，未宣稱交易／補人完整；請重新擷取。')
         if include_trades:
@@ -285,12 +423,13 @@ class Collector:
         # Rank is only final after Yahoo explicitly closes the league.
         if str(metadata.get('is_finished'))=='1':
             try:
-                standings=self.get('/league/'+league_key+'/standings')
+                standings=self.get('/league/'+league_key+'/standings',fresh=True)
                 for t in resources(standings,'team'):
                     if attributes(t).get('team_key')==team_key:
                         rank=number(first(first(t,'team_standings',{}),'rank'))
                         if rank is not None and rank.is_integer() and rank>=1:
                             season['finalRank']=int(rank);season['isChampion']=rank==1
+            except YahooAuthError: raise
             except YahooError: self.warn('官方最終名次無法取得，未推定冠軍。')
         captured=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
         season['source'].update(capturedAt=captured,repository='fantasy-stats',files=[])
@@ -299,7 +438,9 @@ class Collector:
         season['notes']='球隊統計採官方 scoreboard；球員為每日已驗證 active lineup。兩者可能因 Yahoo 修正、出賽限制或缺漏而不同。日期時區 '+self.timezone_name
         evidence={'capturedAt':captured,'calendar':calendar,'dailyRows':daily,'missingDates':missing,'warnings':self.warnings}
         (self.run_dir/'collection.json').write_text(json.dumps(evidence,ensure_ascii=False,allow_nan=False,indent=2),encoding='utf-8')
-        manifest={'provider':'Yahoo Fantasy Sports API','requests':self.manifest}
+        manifest={'schemaVersion':1,'provider':'Yahoo Fantasy Sports API','identity':self.identity,
+                  'requests':[{**entry,'reusable':entry['path'] not in self.rejected} for entry in self.manifest],
+                  'failures':self.failures,'journalSha256':hashlib.sha256(self.journal.read_bytes()).hexdigest()}
         manifest_bytes=json.dumps(manifest,ensure_ascii=False,indent=2).encode()
         (self.run_dir/'source-manifest.json').write_bytes(manifest_bytes)
         season['source']['files']=[{'name':'source-manifest.json','sha256':hashlib.sha256(manifest_bytes).hexdigest()}]

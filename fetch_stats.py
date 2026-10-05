@@ -34,11 +34,14 @@ def parser():
     sub=p.add_subparsers(dest='command')
     sub.add_parser('check-config',help='只檢查本機設定，不連線、不顯示密鑰')
     login=sub.add_parser('login',help='手動授權；不自動擷取資料');login.add_argument('--no-browser',action='store_true')
+    login.add_argument('--callback-file',type=Path,help='等待新的單次 UTF-8 callback 檔案；讀取後移除，請放在私人暫存目錄')
+    login.add_argument('--callback-timeout',type=float,default=300,help='callback 檔案等待秒數，大於 0 且最多 1800，預設 300')
     sub.add_parser('leagues',help='列出登入帳號可讀取的 NBA 聯盟')
     teams=sub.add_parser('teams',help='列出指定聯盟隊伍及 Yahoo team key');teams.add_argument('--league',required=True)
     collect=sub.add_parser('collect',help='擷取某一球季的真實資料，保留每次獨立快照')
     collect.add_argument('--league',required=True);collect.add_argument('--team',required=True)
     collect.add_argument('--output',type=Path,default=ROOT/'reports')
+    collect.add_argument('--resume',type=Path,help='從同帳號／聯盟／球隊的舊 run 複用已驗證快取，仍建立全新快照')
     collect.add_argument('--timezone',default='America/Los_Angeles',help='Yahoo 比賽日／交易日期口徑，預設美國太平洋時間')
     collect.add_argument('--skip-trade-stats',action='store_true',help='保留交易紀錄但暫不擷取雙方每日比較數據')
     export=sub.add_parser('export',help='只從 schema 1 年度 JSON 重建報表，完全離線')
@@ -72,7 +75,9 @@ def main(argv=None):
         client=YahooClient(os.getenv('YAHOO_CLIENT_ID',''),os.getenv('YAHOO_CLIENT_SECRET',''),
                            os.getenv('YAHOO_REDIRECT_URI','https://localhost:8080'),token)
         if args.command=='login':
-            client.login(open_browser=not args.no_browser);print('Yahoo 授權完成，token 僅存於本機。');return 0
+            client.login(open_browser=not args.no_browser,callback_file=args.callback_file,
+                         callback_timeout=args.callback_timeout)
+            print('Yahoo 授權完成，token 僅存於本機。');return 0
         if args.command=='leagues':
             data=client.get('/users;use_login=1/games;game_codes=nba/leagues')
             leagues=list(resources(data,'league'))
@@ -90,7 +95,7 @@ def main(argv=None):
         key_checked(args.team,'team')
         meta=attributes(first(client.get('/league/'+args.league),'league',{}))
         season=season_label(meta['season']);out=new_run(args.output,season,args.league,args.team)
-        collector=Collector(client,out,timezone_name=args.timezone)
+        collector=Collector(client,out,timezone_name=args.timezone,resume_from=args.resume)
         result=collector.collect(args.league,args.team,include_trades=not args.skip_trade_stats)
         export_all(result,out)
         (out/'run-status.json').write_text(json.dumps({'status':'complete','warnings':len(result['quality']['warnings'])}),encoding='utf-8')

@@ -4,6 +4,14 @@
 
 此版本承接 `claude/review-document-analysis-MjABR` 的 NBA 功能，已核對遠端最新提交 `946cc1df1523aa72159ac9aea01fbd437c5e4cde`。保留原有 10 份 CSV、10 分頁 Excel、交易紀錄與比較、補人各次在隊期間、球員累積／週均、所有受支援聯盟類別、類別領先者與 MVP。Excel 改由年度結構化資料直接產生，百分比保留為可計算數值；工作簿放在每次獨立的年度目錄。其他 baseball 分支不屬於這次 NBA 重寫。
 
+## Yahoo API 存取先決條件
+
+若已有能讀取 Fantasy API 的既有 App，可以直接沿用，先驗證最小只讀 API 請求及指定球隊所有權，無需因此另建 App 或重新申請。Yahoo 登入並成功交換 OAuth token，只表示使用者已完成該次授權，**不表示已確認 Fantasy API 存取權限**。
+
+以下申請流程適用於新 App 或尚未開通的 App：依 [Yahoo Fantasy API 存取申請](https://sports.yahoo.com/developer/access/) 提交用途與使用者範圍。已有 Yahoo Developer Network App 時填入同一 App 的 Client ID，個人或單一聯盟用途也需要說明。Yahoo 會審核申請，並要求完成協議及開通所需的開發者資料。API Permissions 已列出 Fantasy Sports 並不足以確認申請中的 App 已完成開通，應依 [官方申請確認流程](https://sports.yahoo.com/developer/application-confirmation/) 及 Yahoo 通知完成對應步驟；這不表示所有既有 App 都必須重新申請。
+
+若 token 交換成功後 Fantasy API 回傳 HTTP 403，尤其錯誤為 `This application is not authorized to perform this action.`，先核對同一 App 目前的權限及開通狀態；若尚無可用 App，再進行申請。403 本身不足以判定尚未開通、登入了錯誤帳號或 scope 有問題，也不能證明球隊持有資格。依證據排查，避免盲改 scope 或反覆授權；必須在 API 可讀取且球隊驗證通過後，才進行正式資料擷取。
+
 ## 安裝
 
 需要 Python 3.11 或更新版本。在這個目錄執行：
@@ -27,6 +35,46 @@ Copy-Item .env.example .env
 上方 key 是格式示例，請替換成自己的真實 key。`--check-config` 不連線，也不顯示密鑰。只有明確執行 `login` 才會啟動新授權；其他命令只使用既有 token／refresh token。若帳號沒有歷史聯盟，請使用冠軍隊所屬帳號，勿把空白資料當作該球季。
 
 Token 預設存於家目錄 `.fantasy-stats/yahoo-token.json`，不放進此 repository。可在命令前使用 `--token-file` 指定其他本機路徑。不要提交 `.env`、token、`reports/` 或私有原始回應；Git 已排除預設位置。OAuth 使用隨機 state、完整 callback 核對、timeout、有限重試及 401 更新，不打印 API 回應內容或 token。
+
+由本機操作工具接收授權回傳時，可省去人工貼網址：
+
+```powershell
+.\.venv\Scripts\python.exe fetch_stats.py --env-file C:\private\yahoo.env login --no-browser --callback-file C:\private\new-random.callback --callback-timeout 1800
+```
+
+請使用 repository 外的私人目錄與全新的隨機檔名，啟動前該 callback 檔不得存在。操作工具在 Yahoo 重導後，把完整 callback URL 以 UTF-8 寫入同目錄暫存檔，再原子改名為指定檔；程式只接收一次，先移除檔案，再檢查 state、redirect、單一授權碼並交換 token。等待上限為 1800 秒，不需啟動 HTTPS 伺服器或更改憑證信任。網址與授權碼屬私有資料，不應寫入一般紀錄或提交 Git；逾時後應停止交付該檔並重新登入。
+
+## 手機完成 Yahoo 授權
+
+只有手機也能完成授權。Yahoo Developer App 與本機設定的 redirect 都必須精確設為 `https://fantasy.piamamba.com/yahoo/callback`，網站需已提供手機授權交接 API。本機控制程式使用 Node.js 24 啟動：
+
+```text
+node scripts/yahoo-phone-auth.mjs
+```
+
+控制程式把以下設定以單一 JSON 寫入 helper 的標準輸入並關閉 stdin。所有路徑須為絕對路徑。密碼由記憶體送入 `sitePassword`，或由 `FANTASY_SITE_PASSWORD` 環境變數提供；不要把實際 JSON 存成檔案、放在命令列參數、貼入聊天或提交 Git。這裡的路徑與球隊代碼都是示例：
+
+```json
+{
+  "python": "C:\\private\\fantasy-stats\\.venv\\Scripts\\python.exe",
+  "collector": "C:\\private\\fantasy-stats\\fetch_stats.py",
+  "envFile": "C:\\private\\yahoo.env",
+  "siteOrigin": "https://fantasy.piamamba.com",
+  "sitePassword": "由控制程式在記憶體中提供",
+  "expectedTeamKey": "000.l.000.t.1",
+  "finalTokenFile": "C:\\private\\yahoo-token.json"
+}
+```
+
+helper 的 stdout 只會產生這次的 HTTPS 手機連結。在手機開啟連結，登入 Yahoo 並同意 Fantasy 讀取權限後，回傳結果會以暫時 RSA 公鑰及 AES-GCM 加密；私鑰只留在本機程序記憶體中。helper 每 5 秒接收結果，驗證 state，再透過一次性檔案交給既有 Python OAuth 程式。拒絕授權、到期或本機程序停止時會終止，不會要求把 callback 或授權碼貼回聊天。
+
+等待手機操作期間，只有不消耗交接資料的 `claim` 查詢會對短暫網路失敗、HTTP 429 或 5xx 自動重試：退避間隔為 5、10、20 秒，之後保持 20 秒，收到正常等待回應時重置。網站提供的 `Retry-After` 會被遵守，總等待不超過這次交接的有效期；取消、本機程序退出或 401／403／410 會立即停止。首次登入及建立交接不自動重試，避免重複建立未知結果的請求。程序已結束時，記憶體中的私鑰無法恢復，必須重新建立手機連結。
+
+新 token 先寫到正式 token 同目錄的隨機暫存檔。helper 使用 Yahoo 目前登入者的 `users;use_login=1/games;game_keys=.../teams` API，確認精確球隊代碼後才原子取代正式 token，然後清除網站加密交接。只有驗證成功才取代既有授權；錯帳號或資料無法驗證時保留原檔，錯誤狀態會提供私人暫存檔的路徑供本機控制程式處理，不包含 token。若 stderr 顯示 `tokenPromoted: true`，代表本機授權已保存，但網站暫存清理尚未確認，無需重複授權。
+
+手機 helper 若在球隊驗證時收到 Yahoo HTTP 403，會明確標示「登入及 token 交換已成功，但 Fantasy API 拒絕存取」，並提示先核對同一 App 目前的權限及開通狀態，不直接判定原因或要求重新申請。此時暫存 token 仍是未驗證的私人復原檔，正式 token 不會被取代，也不會把球隊驗證當成成功；`stagedTokenFile` 僅供本機控制程式處理，不應貼入一般紀錄或提交 Git。
+
+這個 helper 不修改 Yahoo 聯盟或球隊；網站密碼、Cookie、授權網址、code、pickup secret 及 API 回應均不寫入輸出。請保持本機程序運作直到結束，並把手機連結視為本次授權的私人連結。
 
 ## 年度資料與報表
 
@@ -56,6 +104,14 @@ HTML 不載入 CDN、圖片、外部字型或第三方 JavaScript，不需登入
 .\.venv\Scripts\python.exe fetch_stats.py export path\to\season.json
 ```
 
+長球季擷取若中斷，可由前次輸出目錄續跑，仍會產生新的年度快照：
+
+```powershell
+.\.venv\Scripts\python.exe fetch_stats.py collect --league 000.l.000 --team 000.l.000.t.1 --resume path\to\previous-run
+```
+
+只有經 SHA-256 驗證的成功 API 回應可重用；未取得的回應會重新擷取，損壞的快取或來源清單會停止，避免採信不一致的證據。續跑先驗證目前授權帳號與聯盟／球隊／球季，帳號不同或前次缺少身份綁定時會停止。原始快照保留，失效授權會立即中止，不會繼續用空資料完成球季。每次成功回應即寫入 `source-manifest.jsonl`，即使尚未產生 Excel 也可保留已完成的擷取證據。
+
 ## 統計口徑
 
 - **球隊成績**直接取 Yahoo scoreboard 的 `team_stats`，不把全名單 NBA 統計相加冒充實際計分。只有官方 `postevent` 才列為已結算，勝負／類別勝者使用官方紀錄，缺漏保持未知。最終名次僅在 Yahoo `is_finished=1` 時採官方 standings；名次 1 才標冠軍。
@@ -73,6 +129,7 @@ HTML 不載入 CDN、圖片、外部字型或第三方 JavaScript，不需登入
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+node --test tests/yahoo-phone-auth.test.mjs
 ```
 
 所有測試資料都明確標為 SYNTHETIC，與真實冠軍隊無關。涵蓋資料口徑分離、日期覆蓋、零出手、缺漏、重複補人、交易公平期間、OAuth state／更新、公式／HTML 注入、Excel 儲存型別、10 工作表與不覆寫。
