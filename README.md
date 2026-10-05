@@ -36,6 +36,34 @@ Token 預設存於家目錄 `.fantasy-stats/yahoo-token.json`，不放進此 rep
 
 請使用 repository 外的私人目錄與全新的隨機檔名，啟動前該 callback 檔不得存在。操作工具在 Yahoo 重導後，把完整 callback URL 以 UTF-8 寫入同目錄暫存檔，再原子改名為指定檔；程式只接收一次，先移除檔案，再檢查 state、redirect、單一授權碼並交換 token。等待上限為 1800 秒，不需啟動 HTTPS 伺服器或更改憑證信任。網址與授權碼屬私有資料，不應寫入一般紀錄或提交 Git；逾時後應停止交付該檔並重新登入。
 
+## 手機完成 Yahoo 授權
+
+只有手機也能完成授權。Yahoo Developer App 與本機設定的 redirect 都必須精確設為 `https://fantasy.piamamba.com/yahoo/callback`，網站需已提供手機授權交接 API。本機控制程式使用 Node.js 24 啟動：
+
+```text
+node scripts/yahoo-phone-auth.mjs
+```
+
+控制程式把以下設定以單一 JSON 寫入 helper 的標準輸入並關閉 stdin。所有路徑須為絕對路徑。密碼由記憶體送入 `sitePassword`，或由 `FANTASY_SITE_PASSWORD` 環境變數提供；不要把實際 JSON 存成檔案、放在命令列參數、貼入聊天或提交 Git。這裡的路徑與球隊代碼都是示例：
+
+```json
+{
+  "python": "C:\\private\\fantasy-stats\\.venv\\Scripts\\python.exe",
+  "collector": "C:\\private\\fantasy-stats\\fetch_stats.py",
+  "envFile": "C:\\private\\yahoo.env",
+  "siteOrigin": "https://fantasy.piamamba.com",
+  "sitePassword": "由控制程式在記憶體中提供",
+  "expectedTeamKey": "000.l.000.t.1",
+  "finalTokenFile": "C:\\private\\yahoo-token.json"
+}
+```
+
+helper 的 stdout 只會產生這次的 HTTPS 手機連結。在手機開啟連結，登入 Yahoo 並同意 Fantasy 讀取權限後，回傳結果會以暫時 RSA 公鑰及 AES-GCM 加密；私鑰只留在本機程序記憶體中。helper 每 5 秒接收結果，驗證 state，再透過一次性檔案交給既有 Python OAuth 程式。拒絕授權、到期或本機程序停止時會終止，不會要求把 callback 或授權碼貼回聊天。
+
+新 token 先寫到正式 token 同目錄的隨機暫存檔。helper 使用 Yahoo 目前登入者的 `users;use_login=1/games;game_keys=.../teams` API，確認精確球隊代碼後才原子取代正式 token，然後清除網站加密交接。只有驗證成功才取代既有授權；錯帳號或資料無法驗證時保留原檔，錯誤狀態會提供私人暫存檔的路徑供本機控制程式處理，不包含 token。若 stderr 顯示 `tokenPromoted: true`，代表本機授權已保存，但網站暫存清理尚未確認，無需重複授權。
+
+這個 helper 不修改 Yahoo 聯盟或球隊；網站密碼、Cookie、授權網址、code、pickup secret 及 API 回應均不寫入輸出。請保持本機程序運作直到結束，並把手機連結視為本次授權的私人連結。
+
 ## 年度資料與報表
 
 每次執行都建立獨立目錄：
@@ -89,6 +117,7 @@ HTML 不載入 CDN、圖片、外部字型或第三方 JavaScript，不需登入
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
+node --test tests/yahoo-phone-auth.test.mjs
 ```
 
 所有測試資料都明確標為 SYNTHETIC，與真實冠軍隊無關。涵蓋資料口徑分離、日期覆蓋、零出手、缺漏、重複補人、交易公平期間、OAuth state／更新、公式／HTML 注入、Excel 儲存型別、10 工作表與不覆寫。
