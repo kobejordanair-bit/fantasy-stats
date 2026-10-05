@@ -1060,13 +1060,47 @@ def export_csvs(team_name, player_totals, team_weekly_summary,
                 row.append(f"{val:.1%}" if isinstance(val, float) else val)
             w.writerow(row)
 
+    csv_files = [("season_summary.csv", "球員累積"), ("season_weekly_average.csv", "球員週均"),
+                 ("team_weekly_summary.csv", "球隊逐週"), ("player_weekly_detail.csv", "球員逐週"),
+                 ("matchup_results.csv", "對戰記錄"), ("category_record.csv", "類別勝率"),
+                 ("trade_history.csv", "交易紀錄"), ("waiver_history.csv", "撿人紀錄"),
+                 ("trade_roi.csv", "交易ROI"), ("waiver_roi.csv", "撿人ROI")]
     print(f"\n✅ 匯出完畢：")
-    for fn in ["season_summary.csv", "season_weekly_average.csv",
-               "team_weekly_summary.csv", "player_weekly_detail.csv",
-               "matchup_results.csv", "category_record.csv",
-               "trade_history.csv", "waiver_history.csv",
-               "trade_roi.csv", "waiver_roi.csv"]:
+    for fn, _ in csv_files:
         print(f"   {fn}")
+    export_xlsx(csv_files)
+
+
+def _num(v):
+    try:
+        return int(v)
+    except ValueError:
+        try:
+            return float(v)
+        except ValueError:
+            return v
+
+
+def export_xlsx(csv_files, path="fantasy_stats.xlsx"):
+    """把所有 CSV 合併成單一 Excel，每個 CSV 一個分頁"""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+    except ImportError:
+        print("   （略過 Excel：請先 pip install openpyxl）")
+        return
+    wb = Workbook()
+    wb.remove(wb.active)
+    for fn, sheet in csv_files:
+        ws = wb.create_sheet(sheet)
+        with open(fn, newline="", encoding="utf-8-sig") as f:
+            for row in csv.reader(f):
+                ws.append([_num(v) for v in row])
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+        ws.freeze_panes = "A2"
+    wb.save(path)
+    print(f"   {path}（Excel，含全部 {len(csv_files)} 個分頁）")
 
 
 def generate_html_dashboard(team_name, team_weekly_summary, player_weekly_detail,

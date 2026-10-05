@@ -1,4 +1,4 @@
 .env
 *.csv
 fantasy_dashboard.html
-__pycache__/
+__pycache__/*.xlsx
