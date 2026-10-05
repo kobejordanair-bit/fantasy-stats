@@ -18,7 +18,8 @@ def source_note(season):
     scopes=sorted({r.get('scope','unknown') for r in season['playerWeeks']})
     note='來源：'+season.get('source',{}).get('kind','unknown')+'。球隊口徑：'+season.get('quality',{}).get('scope','unknown')+'。球員口徑：'+(', '.join(scopes) or '未記錄')+'。空白表示未知。'
     warnings=season.get('quality',{}).get('warnings',[])
-    if warnings: note+=' 提醒：'+('；'.join(warnings)[:500])+'（完整提醒見 season.json）'
+    if warnings: note+=' 提醒：'+'；'.join(warnings)
+    if season.get('notes'): note+=' 球季筆記：'+season['notes']
     return note
 
 
@@ -188,3 +189,4 @@ def export_all(season,out_dir):
     (out_dir/'season.json').write_text(json.dumps(season,ensure_ascii=False,allow_nan=False,indent=2),encoding='utf-8')
     export_csvs(season,out_dir);export_excel(season,out_dir);export_html(season,out_dir)
     return out_dir
+

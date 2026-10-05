@@ -59,6 +59,17 @@ class ExportTests(unittest.TestCase):
         self.assertIn('manual',note);self.assertIn('roster-week',note)
         self.assertNotIn('官方',note);self.assertNotIn('已驗證',note)
 
+    def test_source_note_preserves_long_warnings_and_season_notes(self):
+        s=fixture()
+        warning='Missing evidence remains unknown. '*40+'warning-end'
+        notes='Annual source context. '*40+'notes-end'
+        s['quality']['warnings']=[warning]
+        s['notes']=notes
+        note=source_note(s)
+        self.assertIn(warning,note)
+        self.assertIn(notes,note)
+        self.assertGreater(len(note),1000)
+
     def test_merged_source_note_fits_chinese_warnings_without_changing_workbook_data(self):
         from openpyxl import load_workbook
         short=fixture();short['quality']['warnings']=[]
