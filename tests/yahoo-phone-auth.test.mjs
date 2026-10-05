@@ -66,8 +66,8 @@ async function harness(t,options={}) {
   const controller=new AbortController();
   const originalToken=JSON.stringify({access_token:'SYNTHETIC_EXISTING_TOKEN'});
   await writeFile(finalTokenFile,originalToken,{mode:0o600});
-  const requests=[],output=[],spawnCalls=[],events=[];
-  let child,delivered,publicKey,pickupHash,clock=Date.now(),claimCount=0,finishCount=0,watcher;
+  const requests=[],output=[],spawnCalls=[],events=[],waits=[];
+  let child,delivered,publicKey,pickupHash,clock=Date.now(),expires=0,claimCount=0,finishCount=0,watcher;
   t.after(()=>clearInterval(watcher));
   const spawnMock=(python,args,spawnOptions)=>{
     spawnCalls.push({python,args,options:spawnOptions});
@@ -109,15 +109,21 @@ async function harness(t,options={}) {
       assert.equal(body.authorizationUrl,authorizationUrl);assert.equal(body.publicKey.alg,'RSA-OAEP-256');
       assert.deepEqual(Object.keys(body.publicKey).sort(),['alg','e','kty','n']);
       publicKey=createPublicKey({key:body.publicKey,format:'jwk'});pickupHash=body.pickupHash;
-      return Response.json({id,connectUrl:options.connectUrl??SITE_ORIGIN+'/yahoo/connect/'+id,expiresAt:new Date(clock+60000).toISOString()},{status:201});
+      expires=clock+(options.expiresInMs??60000);
+      return Response.json({id,connectUrl:options.connectUrl??SITE_ORIGIN+'/yahoo/connect/'+id,expiresAt:new Date(expires).toISOString()},{status:201});
     }
     assert.equal(request.headers.Cookie,undefined,'Pickup never sends the website login cookie');
     assert.equal(createHash('sha256').update(body.pickupSecret).digest('hex'),pickupHash);
     if(route.endsWith('/claim')){
       claimCount++;
+      const step=options.claimPlan?.[claimCount-1];
+      if(options.networkAlways||step==='network')throw new Error('SYNTHETIC_PRIVATE_NETWORK_DETAIL');
+      if(step==='body-network')return new Response(new ReadableStream({start(controller){controller.error(new Error('SYNTHETIC_PRIVATE_BODY_DETAIL'));}}));
+      if(typeof step==='number'&&step!==200)return Response.json({},{status:step});
+      if(step&&typeof step==='object')return Response.json({},{status:step.status,headers:step.retryAfter?{'Retry-After':step.retryAfter}:{}});
       if(options.claimStatus)return Response.json({},{status:options.claimStatus});
       if(options.earlyExit){queueMicrotask(()=>child.emit('close',1));return Response.json({},{status:202});}
-      if(claimCount===1)return Response.json({},{status:202});
+      if(claimCount===1&&!options.claimPlan)return Response.json({},{status:202});
       const payload=options.payload??{code:'SYNTHETIC_PRIVATE_CODE',state};
       return Response.json({envelope:encrypt(payload,publicKey)});
     }
@@ -130,7 +136,7 @@ async function harness(t,options={}) {
     }
     assert.fail('Unexpected route');
   };
-  return {stateDir,finalTokenFile,originalToken,requests,output,events,spawnCalls,get delivered(){return delivered;},run:()=>runPhoneAuth({...config,finalTokenFile},{fetch:fetchMock,spawn:spawnMock,stateDir,output:value=>output.push(value),now:()=>clock,sleep:async ms=>{assert.equal(ms,5000);clock+=ms;},environment:{},signal:controller.signal})};
+  return {stateDir,finalTokenFile,originalToken,requests,output,events,spawnCalls,waits,get delivered(){return delivered;},get clock(){return clock;},get expires(){return expires;},run:()=>runPhoneAuth({...config,finalTokenFile},{fetch:fetchMock,spawn:spawnMock,stateDir,output:value=>output.push(value),now:()=>clock,sleep:async ms=>{assert.ok(ms>0&&ms<=20000);waits.push(ms);clock+=ms;if(options.abortDuringWait)controller.abort();if(options.exitDuringWait)child.emit('close',1);},environment:{},signal:controller.signal})};
 }
 
 test('real crypto + HTTP fixture sends only connect link, atomically hands callback to child, then finishes',async t=>{
@@ -155,11 +161,12 @@ test('denied consent is handed to Python once and never acknowledged as success'
 });
 
 test('expired handoff, stopped Python, wrong state and foreign connect links do not write callbacks or finish',async t=>{
-  for(const options of [{claimStatus:410},{earlyExit:true},{payload:{code:'SYNTHETIC_PRIVATE_CODE',state:'Z'.repeat(43)}},{connectUrl:'https://evil.invalid/connect'}]) {
+  for(const options of [{claimStatus:401},{claimStatus:403},{claimStatus:410},{earlyExit:true},{payload:{code:'SYNTHETIC_PRIVATE_CODE',state:'Z'.repeat(43)}},{connectUrl:'https://evil.invalid/connect'}]) {
     await t.test(JSON.stringify(Object.keys(options)),async childTest=>{
       const h=await harness(childTest,options);
       await assert.rejects(h.run(),error=>error instanceof PhoneAuthError&&!error.message.includes('SYNTHETIC_PRIVATE_CODE'));
       assert.equal(h.delivered,undefined);assert.equal(h.requests.some(r=>r.route.endsWith('/finish')),false);
+      if(options.claimStatus)assert.equal(h.requests.filter(r=>r.route.endsWith('/claim')).length,1);
       assert.deepEqual(await readdir(h.stateDir),['existing-token.json']);
     });
   }
@@ -197,4 +204,34 @@ test('exhausted finish retries report successful token promotion without exposin
   assert.equal(JSON.parse(await readFile(h.finalTokenFile,'utf8')).access_token,'SYNTHETIC_NEW_TOKEN');
   assert.equal(h.requests.filter(r=>r.route.endsWith('/finish')).length,3);
   assert.equal(error.message.includes('SYNTHETIC_NEW_TOKEN'),false);
+});
+
+test('transient claim network and HTTP failures retain the key, reset after pending, and complete once',async t=>{
+  const h=await harness(t,{expiresInMs:180000,claimPlan:['network',202,'network','body-network',503,{status:429,retryAfter:'25'},200]});
+  assert.deepEqual(await h.run(),{completed:true});
+  assert.deepEqual(h.waits,[5000,5000,5000,10000,20000,20000,5000]);
+  assert.equal(h.requests.filter(r=>r.route.endsWith('/claim')).length,7);
+  assert.equal(h.events.filter(event=>event==='callback').length,1);
+  assert.equal(h.requests.filter(r=>r.route==='/api/yahoo/handoffs').length,1);
+  assert.deepEqual(h.output,[SITE_ORIGIN+'/yahoo/connect/'+id]);
+  assert.equal(JSON.parse(await readFile(h.finalTokenFile,'utf8')).access_token,'SYNTHETIC_NEW_TOKEN');
+});
+
+test('continuous claim network failure waits only until expiry and never promotes or prints private details',async t=>{
+  const h=await harness(t,{expiresInMs:1800000,networkAlways:true});
+  await assert.rejects(h.run(),error=>error instanceof PhoneAuthError&&/到期/.test(error.message)&&!error.message.includes('SYNTHETIC_PRIVATE'));
+  const claims=h.requests.filter(r=>r.route.endsWith('/claim')).length;
+  assert.ok(claims>8&&claims<=100,'The same handoff survives transient failures within its bounded lifetime');
+  assert.equal(h.clock,h.expires);assert.equal(h.delivered,undefined);
+  assert.equal(await readFile(h.finalTokenFile,'utf8'),h.originalToken);
+  assert.equal(h.requests.some(r=>r.route.endsWith('/finish')),false);
+  assert.deepEqual(await readdir(h.stateDir),['existing-token.json']);
+});
+
+test('abort and child exit interrupt transient claim retry waits',async t=>{
+  for(const options of [{abortDuringWait:true},{exitDuringWait:true}])await t.test(JSON.stringify(options),async childTest=>{
+    const h=await harness(childTest,{networkAlways:true,...options});await assert.rejects(h.run(),PhoneAuthError);
+    assert.equal(h.requests.filter(r=>r.route.endsWith('/claim')).length,1);
+    assert.equal(await readFile(h.finalTokenFile,'utf8'),h.originalToken);assert.equal(h.delivered,undefined);
+  });
 });

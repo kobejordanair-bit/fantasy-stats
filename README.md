@@ -60,6 +60,8 @@ node scripts/yahoo-phone-auth.mjs
 
 helper 的 stdout 只會產生這次的 HTTPS 手機連結。在手機開啟連結，登入 Yahoo 並同意 Fantasy 讀取權限後，回傳結果會以暫時 RSA 公鑰及 AES-GCM 加密；私鑰只留在本機程序記憶體中。helper 每 5 秒接收結果，驗證 state，再透過一次性檔案交給既有 Python OAuth 程式。拒絕授權、到期或本機程序停止時會終止，不會要求把 callback 或授權碼貼回聊天。
 
+等待手機操作期間，只有不消耗交接資料的 `claim` 查詢會對短暫網路失敗、HTTP 429 或 5xx 自動重試：退避間隔為 5、10、20 秒，之後保持 20 秒，收到正常等待回應時重置。網站提供的 `Retry-After` 會被遵守，總等待不超過這次交接的有效期；取消、本機程序退出或 401／403／410 會立即停止。首次登入及建立交接不自動重試，避免重複建立未知結果的請求。程序已結束時，記憶體中的私鑰無法恢復，必須重新建立手機連結。
+
 新 token 先寫到正式 token 同目錄的隨機暫存檔。helper 使用 Yahoo 目前登入者的 `users;use_login=1/games;game_keys=.../teams` API，確認精確球隊代碼後才原子取代正式 token，然後清除網站加密交接。只有驗證成功才取代既有授權；錯帳號或資料無法驗證時保留原檔，錯誤狀態會提供私人暫存檔的路徑供本機控制程式處理，不包含 token。若 stderr 顯示 `tokenPromoted: true`，代表本機授權已保存，但網站暫存清理尚未確認，無需重複授權。
 
 這個 helper 不修改 Yahoo 聯盟或球隊；網站密碼、Cookie、授權網址、code、pickup secret 及 API 回應均不寫入輸出。請保持本機程序運作直到結束，並把手機連結視為本次授權的私人連結。

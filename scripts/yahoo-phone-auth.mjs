@@ -14,6 +14,10 @@ const CALLBACK=SITE_ORIGIN+'/yahoo/callback';
 const MAX_BODY=32768;
 export class PhoneAuthError extends Error {}
 const fail=message=>{throw new PhoneAuthError(message);};
+function transientConnectionError() {
+  const error=new PhoneAuthError('網站連線暫時失敗；本機沒有交付新的授權碼。');
+  Object.defineProperty(error,'retryable',{value:true});return error;
+}
 
 export function validateConfig(input, environment=process.env) {
   if(!input||typeof input!=='object'||Array.isArray(input))fail('手機授權設定格式不正確。');
@@ -86,7 +90,7 @@ async function jsonBody(response,maxBytes=MAX_BODY) {
   const reader=response.body?.getReader();if(!reader)fail('網站回應格式不正確。');
   let length=0;const chunks=[];
   try {
-    for(;;){const {done,value}=await reader.read();if(done)break;length+=value.length;if(length>maxBytes)fail('網站回應超過允許大小。');chunks.push(value);}
+    for(;;){let chunk;try{chunk=await reader.read();}catch{throw transientConnectionError();}const {done,value}=chunk;if(done)break;length+=value.length;if(length>maxBytes)fail('網站回應超過允許大小。');chunks.push(value);}
     const value=JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if(!value||typeof value!=='object'||Array.isArray(value))fail('網站回應格式不正確。');
     return value;
@@ -189,7 +193,7 @@ export async function runPhoneAuth(input, dependencies={}) {
       headers:{Origin:SITE_ORIGIN,'Content-Type':form?'application/x-www-form-urlencoded':'application/json',...(cookie?{Cookie:cookie}:{})},
       body:form?new URLSearchParams(body).toString():JSON.stringify(body),
       signal:signal?AbortSignal.any([signal,AbortSignal.timeout(20000)]):AbortSignal.timeout(20000)});
-    }catch{fail(signal?.aborted?'手機授權已取消。':'網站連線失敗；本機沒有交付新的授權碼。');}
+    }catch{if(signal?.aborted)fail('手機授權已取消。');throw transientConnectionError();}
   };
   try {
     await mkdir(stateDir,{recursive:true,mode:0o700});
@@ -218,16 +222,35 @@ export async function runPhoneAuth(input, dependencies={}) {
     if(!/^[a-f0-9]{64}$/.test(handoff.id||'')||handoff.connectUrl!==SITE_ORIGIN+'/yahoo/connect/'+handoff.id||typeof handoff.expiresAt!=='string'||!Number.isFinite(expires)||expires<=now()||expires>now()+1801000)fail('網站交接識別或有效期不正確。');
     if(monitor.result)fail('本機授權程式已停止；未交付手機連結。');
     output(handoff.connectUrl);
-    let callback;
+    let callback,consecutiveFailures=0;
+    const waitForClaim=async milliseconds=>{
+      const until=Math.min(expires,now()+milliseconds);
+      while(now()<until) {
+        if(monitor.result)fail('本機授權程式已停止。');
+        await bounded(Promise.race([sleep(Math.min(20000,until-now()),signal),monitor.exited.then(()=>{fail('本機授權程式已停止。');})]),Math.max(1,expires-now()),signal,'手機授權交接已到期。');
+      }
+    };
     for(;;) {
       if(now()>=expires)fail('手機授權交接已到期；請重新開始。');
       if(monitor.result)fail('本機授權程式已停止；不再接收手機回傳。');
-      const claimed=await bounded(Promise.race([request('/api/yahoo/handoffs/'+handoff.id+'/claim',{body:{pickupSecret}}),monitor.exited.then(()=>{fail('本機授權程式已停止。');})]),Math.max(1,expires-now()),signal,'手機授權交接已到期。');
-      if(claimed.status===200){const payload=await jsonBody(claimed);callback=decryptCallback(payload.envelope,privateKey,auth.state);break;}
-      await claimed.body?.cancel();
-      if(claimed.status===410)fail('手機授權交接已到期；請重新開始。');
-      if(claimed.status!==202)fail('網站無法提供這次手機授權交接。');
-      await bounded(Promise.race([sleep(Math.min(5000,Math.max(1,expires-now())),signal),monitor.exited.then(()=>{fail('本機授權程式已停止。');})]),Math.max(1,expires-now()),signal,'手機授權交接已到期。');
+      let retryAfter=0,transient=false;
+      try {
+        const claimed=await bounded(Promise.race([request('/api/yahoo/handoffs/'+handoff.id+'/claim',{body:{pickupSecret}}),monitor.exited.then(()=>{fail('本機授權程式已停止。');})]),Math.max(1,expires-now()),signal,'手機授權交接已到期。');
+        if(claimed.status===200){const payload=await jsonBody(claimed);callback=decryptCallback(payload.envelope,privateKey,auth.state);break;}
+        await claimed.body?.cancel().catch(()=>{});
+        if(claimed.status===410)fail('手機授權交接已到期；請重新開始。');
+        if(claimed.status===202)consecutiveFailures=0;
+        else if(claimed.status===429||(claimed.status>=500&&claimed.status<=599)) {
+          transient=true;
+          const header=claimed.headers.get('retry-after');
+          if(header){const seconds=/^\d+$/.test(header)?Number(header)*1000:Date.parse(header)-now();if(Number.isFinite(seconds)&&seconds>0)retryAfter=seconds;}
+        } else fail('網站無法提供這次手機授權交接。');
+      } catch(error) {
+        if(!(error instanceof PhoneAuthError)||!error.retryable||signal?.aborted||monitor.result||now()>=expires)throw error;
+        transient=true;
+      }
+      const backoff=transient?5000*2**Math.min(consecutiveFailures++,2):5000;
+      await waitForClaim(Math.max(backoff,retryAfter));
     }
     if(monitor.result||now()>=expires)fail('本機授權或手機交接已結束，未交付回傳。');
     const file=await open(pendingFile,'wx',0o600);
